@@ -54,6 +54,14 @@ export type WindowsInstallDirAclProbeOptions = {
   isServeMode?: boolean
   env?: NodeJS.ProcessEnv
   osRelease?: () => string
+  /**
+   * OS UI language tag, which decides whether icacls prints the well-known
+   * package names in the English form the parser can read. Supplied by the
+   * caller (electron's `app` is imported there already, and this module must
+   * stay require('electron')-free for the plain-Node entry guard); unknown reads
+   * as non-English, i.e. verdict unreliable — the conservative direction.
+   */
+  uiLanguage?: () => string
   gpuFallbackActive?: boolean
   /** Test seam — defaults to PROBE_BUDGET_MS. */
   budgetMs?: number
@@ -174,6 +182,7 @@ function probeContext(options: WindowsInstallDirAclProbeOptions, installDir: str
   return {
     installPathClass: classifyInstallPath(installDir, options.env ?? process.env),
     windowsBuild: (options.osRelease ?? release)(),
+    uiLanguage: options.uiLanguage?.() ?? '',
     gpuFallbackActive: options.gpuFallbackActive === true
   }
 }

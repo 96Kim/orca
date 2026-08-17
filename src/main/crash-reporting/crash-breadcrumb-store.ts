@@ -10,6 +10,11 @@ const MAX_BREADCRUMBS = 30
 // Why: retain two thresholds for each renderer surface without growing the ring,
 // plus one slot for the once-per-launch install-dir ACL crumb below.
 const MAX_RETAINED_BREADCRUMBS = 5
+// Why: recorded once at startup, so it is permanently the OLDEST retained key
+// and plain LRU eviction would drop it first once the retained key space
+// outgrows the cap (e.g. a third renderer surface). Exempt it — retaining it is
+// only worth anything if it survives to explain a crash arriving much later.
+const EVICTION_EXEMPT_RETAINED_KEY: string = WINDOWS_INSTALL_DIR_ACL_BREADCRUMB
 // Why: coalesceKey embeds an open-string agentType (length-trimmed only, never
 // enum-checked), so the key space is unbounded over a long multi-agent/SSH session.
 // Bound the coalesce map the same way ProcessGoneDedupe bounds its key map.
@@ -75,11 +80,13 @@ export function recordCrashBreadcrumb(
     retainedBreadcrumbs.delete(retainedKey)
     retainedBreadcrumbs.set(retainedKey, breadcrumb)
     while (retainedBreadcrumbs.size > MAX_RETAINED_BREADCRUMBS) {
-      const oldestKey = retainedBreadcrumbs.keys().next()
-      if (oldestKey.done) {
+      const oldestEvictableKey = [...retainedBreadcrumbs.keys()].find(
+        (key) => key !== EVICTION_EXEMPT_RETAINED_KEY
+      )
+      if (oldestEvictableKey === undefined) {
         break
       }
-      retainedBreadcrumbs.delete(oldestKey.value)
+      retainedBreadcrumbs.delete(oldestEvictableKey)
     }
     return breadcrumb
   }

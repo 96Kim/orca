@@ -26,8 +26,15 @@ export type ProbeContext = {
   installPathClass: InstallPathClass
   windowsBuild: string
   gpuFallbackActive: boolean
+  /** OS UI language tag; empty when it could not be read. */
+  uiLanguage: string
   reason?: string
 }
+
+const MAX_UI_LANGUAGE_LENGTH = 35
+
+/** BCP-47 English: the only UI language on which icacls prints the well-known package names verbatim. */
+const ENGLISH_UI_LANGUAGE = /^en(?:[-_]|$)/i
 
 export function targetFields(
   key: TargetKey,
@@ -42,6 +49,7 @@ export function targetFields(
   const { facts } = outcome
   return {
     [`${key}PackageAceCount`]: facts.packageAceCount,
+    [`${key}ResolvedPackageAceCount`]: facts.resolvedPackageAceCount,
     [`${key}UnresolvedPackageSidCount`]: facts.unresolvedPackageSidCount,
     [`${key}CapabilitySidCount`]: facts.capabilitySidCount,
     [`${key}InheritedPackageAceCount`]: facts.inheritedPackageAceCount,
@@ -86,6 +94,9 @@ export function rollupFields(
     // inherited ACE seen by all three targets counts three times. The SID set
     // below is deduped instead, which is why only these carry the suffix.
     packageAceCountAcrossTargets: facts.packageAceCount,
+    // Why separate: icacls prints an installed package's SID as its family name,
+    // so a zero packageAceCount does NOT mean the tree carries no package ACEs.
+    resolvedPackageAceCountAcrossTargets: facts.resolvedPackageAceCount,
     capabilitySidCountAcrossTargets: facts.capabilitySidCount,
     inheritedPackageAceCountAcrossTargets: facts.inheritedPackageAceCount,
     explicitPackageAceCountAcrossTargets: facts.explicitPackageAceCount,
@@ -99,7 +110,16 @@ export function rollupFields(
     // Why: icacls localizes the well-known package names and never prints their
     // SID form, so on non-English Windows a present grant is unreadable and
     // matchesPoisonSignature can be a false positive. False => discount it.
-    wellKnownNameDetectionReliable: probedTargetCount > 0 && facts.englishSystemPrincipalSeen,
+    // Keyed on the UI language, not on principal spelling: French/Spanish/
+    // Japanese localize "ALL APPLICATION PACKAGES" while keeping BUILTIN and
+    // NT AUTHORITY verbatim, so those principals cannot vouch for the names.
+    wellKnownNameDetectionReliable:
+      probedTargetCount > 0 &&
+      ENGLISH_UI_LANGUAGE.test(context.uiLanguage) &&
+      facts.englishSystemPrincipalSeen,
+    uiLanguage: sanitizeCrashReportString(context.uiLanguage, MAX_UI_LANGUAGE_LENGTH),
+    // Secondary: catches a mangled or empty read an English UI language still vouches for.
+    englishSystemPrincipalSeen: facts.englishSystemPrincipalSeen,
     matchesPoisonSignature: probedTargetCount > 0 ? facts.matchesPoisonSignature : null,
     installPathClass: context.installPathClass,
     windowsBuild: sanitizeCrashReportString(context.windowsBuild, 60),

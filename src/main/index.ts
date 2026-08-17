@@ -881,7 +881,12 @@ if (hasSingleInstanceLock) {
     enableMainProcessGpuFeatures()
   }
   // Why: read-only DACL breadcrumb answering whether the install tree carries the orphan package-authority ACE shape we reproduced. Runs here, not in openMainWindow: GPU/renderer children die at init, so the crumb must exist before the first child spawns (win32-only and fire-and-forget; it needs only process.execPath).
-  probeWindowsInstallDirAcl({ isServeMode, gpuFallbackActive: gpuFallbackActiveThisLaunch })
+  // Why uiLanguage: icacls localizes the well-known package names, so the poison verdict is only readable on an English UI; getPreferredSystemLanguages is safe before ready, unlike app.getLocale().
+  probeWindowsInstallDirAcl({
+    isServeMode,
+    gpuFallbackActive: gpuFallbackActiveThisLaunch,
+    uiLanguage: () => app.getPreferredSystemLanguages()[0] ?? ''
+  })
   // Why: headless serve's offscreen BrowserWindows need an X display (Xvfb) on Linux; the result gates whether the offscreen backend is installed.
   headlessBrowserDisplayAvailable = ensureVirtualDisplayForHeadlessServe({ isServeMode })
 }

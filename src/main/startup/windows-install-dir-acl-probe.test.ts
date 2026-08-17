@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   sanitizeCrashReportDetails,
   type CrashReportBreadcrumbData
@@ -74,6 +74,28 @@ const LOCALIZED_ORPHAN_PLUS_GRANT = (target: string): string =>
 Erfolgreich verarbeitete Dateien: 1; bei 0 Dateien ist ein Verarbeitungsfehler aufgetreten.
 `
 
+// French-shaped icacls output: BUILTIN and NT AUTHORITY survive verbatim (as they
+// do on Spanish, Portuguese and Japanese Windows) while the package grant is
+// localized — so principal spelling cannot vouch for the package names.
+const PARTLY_LOCALIZED_ORPHAN_PLUS_GRANT = (target: string): string =>
+  `${target} AUTORITE DE PACKAGE D'APPLICATION\\TOUS LES PACKAGES D'APPLICATION:(OI)(CI)(RX)
+                    S-1-15-2-999-999-999:(I)(OI)(CI)(F)
+                    AUTORITE NT\\SYSTEM:(I)(OI)(CI)(F)
+                    BUILTIN\\Administrateurs:(I)(OI)(CI)(F)
+
+Fichiers correctement traités : 1 ; Échec du traitement de 0 fichiers
+`
+
+// A package SID icacls CAN resolve prints as the bare family name, so no
+// S-1-15-2 text appears for it at all.
+const RESOLVED_PACKAGE_FAMILY = (target: string): string =>
+  `${target} Microsoft.WindowsTerminal_8wekyb3d8bbwe:(OI)(CI)(RX)
+                    NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)
+                    awin\\neil:(I)(OI)(CI)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+`
+
 type SpawnCall = { command: string; args: string[] }
 
 type FakeSpawn = {
@@ -133,6 +155,7 @@ function runProbe(
       installDir: INSTALL_DIR,
       env: { LOCALAPPDATA: 'C:\\Users\\neil\\AppData\\Local' },
       osRelease: () => '10.0.26200',
+      uiLanguage: () => 'en-US',
       listInstallDirEntries: async () => ENTRIES,
       recordStartBreadcrumb: () => undefined,
       ...options,
@@ -161,7 +184,9 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.unresolvedPackageSidCount).toBe(0)
     expect(data.probedTargetCount).toBe(3)
     expect(data.aceLineCountAcrossTargets).toBe(9)
+    expect(data.resolvedPackageAceCountAcrossTargets).toBe(0)
     expect(data.wellKnownNameDetectionReliable).toBe(true)
+    expect(data.uiLanguage).toBe('en-US')
     expect(data.installPathClass).toBe('localappdata-programs')
     expect(data.windowsBuild).toBe('10.0.26200')
     expect(data.reason).toBeUndefined()
@@ -218,6 +243,41 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.unresolvedPackageSidCount).toBe(1)
   })
 
+  // The case principal spelling cannot catch: French/Spanish/Japanese keep
+  // BUILTIN and NT AUTHORITY while localizing ALL APPLICATION PACKAGES, so a
+  // healthy box reports the poison signature and must not read as trustworthy.
+  it('marks the verdict unreliable on a non-English UI even when the principals look English', async () => {
+    const { data } = await runProbe({
+      spawnFn: createFakeSpawn((target) => ({
+        stdout: PARTLY_LOCALIZED_ORPHAN_PLUS_GRANT(target)
+      })).spawnFn,
+      uiLanguage: () => 'fr-FR'
+    })
+    expect(data.matchesPoisonSignature).toBe(true)
+    expect(data.englishSystemPrincipalSeen).toBe(true)
+    expect(data.wellKnownNameDetectionReliable).toBe(false)
+    expect(data.uiLanguage).toBe('fr-FR')
+  })
+
+  it('marks the verdict unreliable when the UI language cannot be read', async () => {
+    const { data } = await runProbe({
+      spawnFn: createFakeSpawn((target) => ({ stdout: ORPHAN(target) })).spawnFn,
+      uiLanguage: () => ''
+    })
+    expect(data.matchesPoisonSignature).toBe(true)
+    expect(data.wellKnownNameDetectionReliable).toBe(false)
+  })
+
+  // packageAceCount only sees the raw-SID and well-known-name forms, so a
+  // resolvable package grant would otherwise read as "no package ACEs at all".
+  it('counts package ACEs icacls resolved to a family name separately', async () => {
+    const { data } = await probeWithOutput(RESOLVED_PACKAGE_FAMILY)
+    expect(data.resolvedPackageAceCountAcrossTargets).toBe(3)
+    expect(data.installDirResolvedPackageAceCount).toBe(1)
+    expect(data.packageAceCountAcrossTargets).toBe(0)
+    expect(data.matchesPoisonSignature).toBe(false)
+  })
+
   it('probes only the install dir plus one dll and one resource file, with no flags', async () => {
     const fake = createFakeSpawn((target) => ({ stdout: CLEAN(target) }))
     await runProbe({ spawnFn: fake.spawnFn })
@@ -253,20 +313,41 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.moduleFileReason).toBe('spawn: ENOENT')
   })
 
-  it('spends one shared budget across every icacls call, not one per target', async () => {
-    const budgetMs = 500
-    const startedAt = Date.now()
+  it('times every hung icacls call out against the budget', async () => {
     const { data } = await runProbe({
       spawnFn: createFakeSpawn(() => ({ hang: true })).spawnFn,
-      budgetMs
+      budgetMs: 300
     })
-    const elapsed = Date.now() - startedAt
     expect(data.installDirReason).toBe('timeout')
     expect(data.moduleFileReason).toBe('timeout')
     expect(data.resourceFileReason).toBe('timeout')
     expect(data.probedTargetCount).toBe(0)
-    // A per-target budget would take 3x this; concurrency plus one deadline is 1x.
-    expect(elapsed).toBeLessThan(budgetMs * 2)
+  })
+
+  // The only path where shared-vs-per-target is observable: the three reads run
+  // concurrently, so a per-target budget costs the same wall time — but a listing
+  // that eats the whole budget must leave the child reads nothing.
+  it('spends one shared budget across every icacls call, not one per target', async () => {
+    // Only Date is faked; setImmediate/setTimeout must stay real for the probe to run.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const budgetMs = 500
+      const { data } = await runProbe({
+        spawnFn: createFakeSpawn((target) => ({ stdout: ORPHAN(target) })).spawnFn,
+        budgetMs,
+        listInstallDirEntries: async () => {
+          vi.setSystemTime(Date.now() + budgetMs + 10)
+          return ENTRIES
+        }
+      })
+      // Started before the listing, so this one still parsed.
+      expect(data.installDirMatchesPoisonSignature).toBe(true)
+      expect(data.moduleFileReason).toBe('budget-exhausted')
+      expect(data.resourceFileReason).toBe('budget-exhausted')
+      expect(data.probedTargetCount).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('still reports the install dir when listing it never resolves', async () => {
@@ -454,6 +535,25 @@ describe('parsePackageAuthorityAces', () => {
     expect(facts.unresolvedPackageSids).toEqual(['S-1-15-2-999-999-999'])
     expect(facts.inheritedPackageAceCount).toBe(1)
     expect(facts.matchesPoisonSignature).toBe(true)
+  })
+
+  // Domain and well-known principals must never be mistaken for a package family
+  // name, or resolvedPackageAceCount becomes noise on every machine.
+  it('counts only family-name-shaped principals as resolved package ACEs', () => {
+    expect(
+      parsePackageAuthorityAces(RESOLVED_PACKAGE_FAMILY(INSTALL_DIR), INSTALL_DIR)
+    ).toMatchObject({
+      resolvedPackageAceCount: 1,
+      packageAceCount: 0,
+      matchesPoisonSignature: false
+    })
+    expect(
+      parsePackageAuthorityAces(REAL_PROGRAM_FILES, 'C:\\Program Files').resolvedPackageAceCount
+    ).toBe(0)
+    expect(
+      parsePackageAuthorityAces(`${INSTALL_DIR} awin\\build_agent0123456:(F)\n`, INSTALL_DIR)
+        .resolvedPackageAceCount
+    ).toBe(0)
   })
 
   it('ignores the trailing summary line and blank lines', () => {

@@ -82,6 +82,28 @@ describe('crash breadcrumb store', () => {
     expect(retained[0].data).toEqual({ status: 'complete', matchesPoisonSignature: true })
   })
 
+  // It is recorded first, so it is permanently the OLDEST retained key: plain LRU
+  // eviction would drop it the moment the retained key space outgrows the cap
+  // (e.g. a third renderer surface), deleting it from every later crash report.
+  it('never evicts the install-dir ACL crumb when retained keys contend for slots', () => {
+    recordCrashBreadcrumb('windows_install_dir_acl', { status: 'complete' })
+    for (let index = 0; index < 8; index += 1) {
+      recordCrashBreadcrumb('renderer_memory_highwater', {
+        rendererSurface: `surface-${index}`,
+        thresholdPct: 80
+      })
+    }
+
+    const snapshot = getCrashBreadcrumbSnapshot()
+
+    expect(snapshot.filter((crumb) => crumb.name === 'windows_install_dir_acl')).toHaveLength(1)
+    expect(
+      snapshot
+        .filter((crumb) => crumb.name === 'renderer_memory_highwater')
+        .map((crumb) => crumb.data?.rendererSurface)
+    ).toEqual(['surface-4', 'surface-5', 'surface-6', 'surface-7'])
+  })
+
   it('redacts sensitive breadcrumb fields before they can be snapshotted', () => {
     recordCrashBreadcrumb('workspace_opened', {
       path: '/Users/alice/project',

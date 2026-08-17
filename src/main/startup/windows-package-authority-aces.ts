@@ -18,17 +18,29 @@ const ALL_RESTRICTED_APPLICATION_PACKAGES_SID = 'S-1-15-2-2'
 // on Windows 11 26200: it prints "APPLICATION PACKAGE AUTHORITY\ALL APPLICATION
 // PACKAGES", never the SID), and it localizes them — so on non-English Windows
 // neither regex below can fire and a present well-known grant is invisible.
-// `englishSystemPrincipalSeen` is the guard for that: it says whether this DACL
-// printed English system principals at all, i.e. whether a false
-// `hasAllApplicationPackages` is possible. `friendlyNameFallbackUsed` records
-// only that the English name path is what supplied a positive.
+// `friendlyNameFallbackUsed` records only that the English name path supplied a
+// positive; the OS UI language is what says whether to trust a negative.
 const ALL_APPLICATION_PACKAGES_NAME = /\ball application packages$/i
 const ALL_RESTRICTED_APPLICATION_PACKAGES_NAME = /\ball restricted application packages$/i
-/** English system principals every Windows install DACL carries; absent => localized icacls. */
+// Why this cannot vouch for the names above: the package-authority names and
+// these principals are separate localizable resources, and French/Spanish/
+// Japanese Windows keeps BUILTIN and NT AUTHORITY verbatim while localizing
+// "ALL APPLICATION PACKAGES". Absence proves the output was localized; presence
+// proves nothing about the package names — so this stays a secondary signal that
+// catches a mangled or empty read (see wellKnownNameDetectionReliable).
 const ENGLISH_SYSTEM_PRINCIPAL = /(?:^|[\s(])(?:NT AUTHORITY|BUILTIN|NT SERVICE|CREATOR OWNER)[\\:]/
 
-/** Package authority: every AppContainer / package identity lives here. */
+// Why: every AppContainer / package identity lives under this authority, but
+// icacls prints the raw SID only when it CANNOT resolve it — a package installed
+// on this box prints as its family name instead (PACKAGE_FAMILY_NAME below), so
+// zero here means "no unresolvable package ACEs", not "no package ACEs".
 const PACKAGE_SID = /^S-1-15-2-[\d-]+$/i
+// `Name_<13-char publisher hash>` (e.g. Microsoft.WindowsTerminal_8wekyb3d8bbwe):
+// locale-independent, and never a domain principal because it carries no
+// backslash. Such an ACE is still a package grant the child token does not hold,
+// so it is the second hypothesis if the unresolvable-SID one does not hold —
+// recorded, never scored into matchesPoisonSignature.
+const PACKAGE_FAMILY_NAME = /^[^\\/:*?"<>|\s][^\\/:*?"<>|]*_[a-z0-9]{13}$/i
 /** Capability authority: proven harmless in the repro, tracked to stay distinguishable. */
 const CAPABILITY_SID = /^S-1-15-3-[\d-]+$/i
 
@@ -40,7 +52,10 @@ const ACE_LINE = /^(.*):((?:\([^()]*\))+)\s*$/
 const SID_ACE_LINE = /(?:^|[\s\\])(S-1-15-[23]-[\d-]+):((?:\([^()]*\))+)\s*$/i
 
 export type PackageAuthorityAceFacts = {
+  /** ACEs recognizable as package authority: raw S-1-15-2-* plus the well-known names. */
   packageAceCount: number
+  /** Package ACEs icacls resolved to a package family name, invisible to packageAceCount. */
+  resolvedPackageAceCount: number
   hasAllApplicationPackages: boolean
   hasAllRestrictedAppPackages: boolean
   unresolvedPackageSidCount: number
@@ -49,7 +64,7 @@ export type PackageAuthorityAceFacts = {
   inheritedPackageAceCount: number
   explicitPackageAceCount: number
   friendlyNameFallbackUsed: boolean
-  /** False => icacls output was localized, so well-known-name detection is blind. */
+  /** False => output was localized; true does NOT prove the package names were readable. */
   englishSystemPrincipalSeen: boolean
   /** Parse-health: 0 ACE lines off a real install path means a format surprise, not a clean DACL. */
   aceLineCount: number
@@ -60,6 +75,7 @@ export type PackageAuthorityAceFacts = {
 function emptyFacts(): PackageAuthorityAceFacts {
   return {
     packageAceCount: 0,
+    resolvedPackageAceCount: 0,
     hasAllApplicationPackages: false,
     hasAllRestrictedAppPackages: false,
     unresolvedPackageSidCount: 0,
@@ -121,6 +137,9 @@ function applyAce(facts: PackageAuthorityAceFacts, ace: ParsedAce): void {
     ALL_RESTRICTED_APPLICATION_PACKAGES_NAME.test(principal) ||
     ALL_APPLICATION_PACKAGES_NAME.test(principal)
   if (!PACKAGE_SID.test(principal) && !isFriendlyName) {
+    if (PACKAGE_FAMILY_NAME.test(principal)) {
+      facts.resolvedPackageAceCount += 1
+    }
     return
   }
   facts.packageAceCount += 1
@@ -186,6 +205,7 @@ export function mergePackageAuthorityAceFacts(
   const seenSids = new Set<string>()
   for (const facts of all) {
     merged.packageAceCount += facts.packageAceCount
+    merged.resolvedPackageAceCount += facts.resolvedPackageAceCount
     merged.capabilitySidCount += facts.capabilitySidCount
     merged.inheritedPackageAceCount += facts.inheritedPackageAceCount
     merged.explicitPackageAceCount += facts.explicitPackageAceCount
