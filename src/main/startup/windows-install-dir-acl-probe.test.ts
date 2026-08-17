@@ -633,6 +633,18 @@ describe('parsePackageAuthorityAces', () => {
     expect(facts.matchesPoisonSignature).toBe(true)
   })
 
+  // Same for inherit-only in raw SID form: it grants on children, not here.
+  it('does not let an inherit-only well-known package SID satisfy an orphan', () => {
+    const facts = parsePackageAuthorityAces(
+      `${INSTALL_DIR} S-1-15-2-2:(OI)(CI)(IO)(GR,GE)\nS-1-15-2-999:(I)(OI)(CI)(F)\n`,
+      INSTALL_DIR
+    )
+    expect(facts.hasAllRestrictedAppPackages).toBe(false)
+    expect(facts.nonGrantingWellKnownPackageAceCount).toBe(1)
+    expect(facts.packageAceCount).toBe(2)
+    expect(facts.matchesPoisonSignature).toBe(true)
+  })
+
   it('sees no English system principal in localized output', () => {
     const facts = parsePackageAuthorityAces(LOCALIZED_ORPHAN_PLUS_GRANT(INSTALL_DIR), INSTALL_DIR)
     expect(facts.englishSystemPrincipalSeen).toBe(false)
