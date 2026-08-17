@@ -84,7 +84,11 @@ import {
   type CookieImportMode,
   type ReplacedImportedDomainCookies
 } from './browser-cookie-import-policy'
-import { removeTransplantableCookies, withCookieClearLock } from './browser-cookie-import-clear'
+import {
+  acquireCookieMutationLock,
+  removeTransplantableCookies,
+  withCookieMutationLock
+} from './browser-cookie-import-clear'
 import { openCookieClearStore } from './browser-cookie-clear-store'
 import {
   createChromiumCookieSnapshot,
@@ -602,6 +606,13 @@ async function importValidatedCookies(
       ? openCookieClearStore(targetSession)
       : null
 
+  // Why (STA-4601): replace, writes, and rollback are one live-jar transaction. Releasing the lock
+  // after the replace lets a second import interleave, so this run's rollback could remove cookies
+  // the newer import already wrote and reported as imported.
+  const releaseMutationLock = cookieClearStore
+    ? await acquireCookieMutationLock(targetSession)
+    : null
+
   try {
     if (cookieClearStore) {
       try {
@@ -699,7 +710,11 @@ async function importValidatedCookies(
       }
     }
   } finally {
-    cookieClearStore?.dispose()
+    try {
+      cookieClearStore?.dispose()
+    } finally {
+      releaseMutationLock?.()
+    }
   }
 
   diag(
@@ -1534,14 +1549,23 @@ export async function importCookiesFromBrowser(
   let liveCookiesPath = resolveChromiumCookiesPath(partitionDir)
 
   // Why: Electron creates the Cookies file only after a cookie is stored; a throwaway set/remove forces DB init for unused profiles.
+  // Why (STA-4601): this probe MUTATES the live jar, so it runs under the same per-partition lock as
+  // the import itself. An earlier revision left it outside on the argument that no import writes
+  // https://localhost/__init — that was wrong. normalizeCookieImportDomain accepts `localhost`,
+  // cookie names are unrestricted, and deriveUrl produces exactly this URL, so an import CAN write
+  // that coordinate. Unlocked, this probe's remove() would delete a cookie a concurrent import had
+  // just written and reported as imported. The cost is negligible: the probe only runs for a
+  // partition that has never stored a cookie, so it is at most a one-time wait per profile.
   if (!liveCookiesPath) {
-    try {
-      await targetSession.cookies.set({ url: 'https://localhost', name: '__init', value: '1' })
-      await targetSession.cookies.remove('https://localhost', '__init')
-      await targetSession.cookies.flushStore()
-    } catch {
-      // ignore — the set/remove may fail but flushStore should still create the file
-    }
+    await withCookieMutationLock(targetSession, async () => {
+      try {
+        await targetSession.cookies.set({ url: 'https://localhost', name: '__init', value: '1' })
+        await targetSession.cookies.remove('https://localhost', '__init')
+        await targetSession.cookies.flushStore()
+      } catch {
+        // ignore — the set/remove may fail but flushStore should still create the file
+      }
+    })
     liveCookiesPath = resolveChromiumCookiesPath(partitionDir)
   }
 
@@ -1884,47 +1908,51 @@ export async function importCookiesFromBrowser(
     // live session is the only one that works.
     const cookieClearStore = openCookieClearStore(targetSession)
     try {
-      await withCookieClearLock(targetSession, () =>
-        removeTransplantableCookies({
+      // Why (STA-4601): the clear and the writes that repopulate the jar are one transaction. With
+      // the lock held for the clear alone, a second import could clear between them and this run
+      // would write its cookies on top of the newer import's jar. The lock covers the LIVE JAR
+      // only — staging and cold-start replay keep their existing semantics.
+      await withCookieMutationLock(targetSession, async () => {
+        await removeTransplantableCookies({
           cookies: cookieClearStore,
           clearData: (options) => targetSession.clearData(options),
           snapshotClearIdentities: (cookies) => cookieClearStore.snapshotClearIdentities(cookies),
           restoreClearIdentities: (identities) =>
             cookieClearStore.restoreClearIdentities(identities)
         })
-      )
+        diag(
+          `  cleared existing session cookies before loading ${decryptedCookies.length} imported cookies`
+        )
+
+        // Why: load into memory via cookies.set() so imported cookies work without a restart.
+        for (const cookie of decryptedCookies) {
+          const url = deriveUrl(cookie.domain, cookie.secure)
+          if (!url) {
+            memoryFailed++
+            continue
+          }
+          try {
+            // Why: Chromium rejects __Host- cookies unless they omit domain and use path=/.
+            const isHostPrefixed = cookie.name.startsWith('__Host-')
+            await targetSession.cookies.set({
+              url,
+              name: cookie.name,
+              value: cookie.value,
+              ...(isHostPrefixed ? {} : { domain: cookie.domain }),
+              path: isHostPrefixed ? '/' : cookie.path,
+              secure: cookie.secure,
+              httpOnly: cookie.httpOnly,
+              sameSite: cookie.sameSite,
+              expirationDate: cookie.expirationDate
+            })
+            memoryLoaded++
+          } catch {
+            memoryFailed++
+          }
+        }
+      })
     } finally {
       cookieClearStore.dispose()
-    }
-    diag(
-      `  cleared existing session cookies before loading ${decryptedCookies.length} imported cookies`
-    )
-
-    // Why: load into memory via cookies.set() so imported cookies work without a restart.
-    for (const cookie of decryptedCookies) {
-      const url = deriveUrl(cookie.domain, cookie.secure)
-      if (!url) {
-        memoryFailed++
-        continue
-      }
-      try {
-        // Why: Chromium rejects __Host- cookies unless they omit domain and use path=/.
-        const isHostPrefixed = cookie.name.startsWith('__Host-')
-        await targetSession.cookies.set({
-          url,
-          name: cookie.name,
-          value: cookie.value,
-          ...(isHostPrefixed ? {} : { domain: cookie.domain }),
-          path: isHostPrefixed ? '/' : cookie.path,
-          secure: cookie.secure,
-          httpOnly: cookie.httpOnly,
-          sameSite: cookie.sameSite,
-          expirationDate: cookie.expirationDate
-        })
-        memoryLoaded++
-      } catch {
-        memoryFailed++
-      }
     }
 
     diag(`  memory load: ${memoryLoaded} OK, ${memoryFailed} failed`)
