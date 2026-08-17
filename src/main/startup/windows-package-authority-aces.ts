@@ -14,13 +14,18 @@ const ALL_APPLICATION_PACKAGES_SID = 'S-1-15-2-1'
 /** Well-known: ALL RESTRICTED APPLICATION PACKAGES. */
 const ALL_RESTRICTED_APPLICATION_PACKAGES_SID = 'S-1-15-2-2'
 
-// Why: icacls resolves both well-known package SIDs to localized friendly names
-// (verified on Windows 11 26200: it prints "APPLICATION PACKAGE AUTHORITY\ALL
-// APPLICATION PACKAGES", never the SID), so the name form is the only signal
-// available for them. `friendlyNameFallbackUsed` records when that path fired so
-// a non-English field report is not silently misread as "no well-known SID".
+// Why: icacls resolves both well-known package SIDs to friendly names (verified
+// on Windows 11 26200: it prints "APPLICATION PACKAGE AUTHORITY\ALL APPLICATION
+// PACKAGES", never the SID), and it localizes them — so on non-English Windows
+// neither regex below can fire and a present well-known grant is invisible.
+// `englishSystemPrincipalSeen` is the guard for that: it says whether this DACL
+// printed English system principals at all, i.e. whether a false
+// `hasAllApplicationPackages` is possible. `friendlyNameFallbackUsed` records
+// only that the English name path is what supplied a positive.
 const ALL_APPLICATION_PACKAGES_NAME = /\ball application packages$/i
 const ALL_RESTRICTED_APPLICATION_PACKAGES_NAME = /\ball restricted application packages$/i
+/** English system principals every Windows install DACL carries; absent => localized icacls. */
+const ENGLISH_SYSTEM_PRINCIPAL = /(?:^|[\s(])(?:NT AUTHORITY|BUILTIN|NT SERVICE|CREATOR OWNER)[\\:]/
 
 /** Package authority: every AppContainer / package identity lives here. */
 const PACKAGE_SID = /^S-1-15-2-[\d-]+$/i
@@ -29,6 +34,10 @@ const CAPABILITY_SID = /^S-1-15-3-[\d-]+$/i
 
 /** `principal:(FLAG)(FLAG)…` where the flag run is the whole line suffix. */
 const ACE_LINE = /^(.*):((?:\([^()]*\))+)\s*$/
+// Why: SIDs are pure ASCII, so this survives both a failed echo-strip and an OEM
+// codepage mangling the echoed path — the case that would otherwise drop the
+// orphan ACE (it is line 1 when inherited) and report a poisoned box as clean.
+const SID_ACE_LINE = /(?:^|[\s\\])(S-1-15-[23]-[\d-]+):((?:\([^()]*\))+)\s*$/i
 
 export type PackageAuthorityAceFacts = {
   packageAceCount: number
@@ -40,6 +49,11 @@ export type PackageAuthorityAceFacts = {
   inheritedPackageAceCount: number
   explicitPackageAceCount: number
   friendlyNameFallbackUsed: boolean
+  /** False => icacls output was localized, so well-known-name detection is blind. */
+  englishSystemPrincipalSeen: boolean
+  /** Parse-health: 0 ACE lines off a real install path means a format surprise, not a clean DACL. */
+  aceLineCount: number
+  outputLineCount: number
   matchesPoisonSignature: boolean
 }
 
@@ -54,6 +68,9 @@ function emptyFacts(): PackageAuthorityAceFacts {
     inheritedPackageAceCount: 0,
     explicitPackageAceCount: 0,
     friendlyNameFallbackUsed: false,
+    englishSystemPrincipalSeen: false,
+    aceLineCount: 0,
+    outputLineCount: 0,
     matchesPoisonSignature: false
   }
 }
@@ -75,6 +92,11 @@ function stripEchoedTarget(line: string, target: string): string {
 type ParsedAce = { principal: string; inherited: boolean }
 
 function parseAceLine(line: string, target: string): ParsedAce | null {
+  // SID-anchored first: it needs neither the echo-strip nor a decodable path.
+  const sidMatch = SID_ACE_LINE.exec(line.trimEnd())
+  if (sidMatch) {
+    return { principal: sidMatch[1], inherited: /\(I\)/.test(sidMatch[2]) }
+  }
   const match = ACE_LINE.exec(stripEchoedTarget(line.trim(), target).trim())
   if (!match) {
     return null
@@ -137,8 +159,14 @@ export function parsePackageAuthorityAces(
 ): PackageAuthorityAceFacts {
   const facts = emptyFacts()
   for (const line of icaclsOutput.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue
+    }
+    facts.outputLineCount += 1
+    facts.englishSystemPrincipalSeen ||= ENGLISH_SYSTEM_PRINCIPAL.test(line)
     const ace = parseAceLine(line, target)
     if (ace) {
+      facts.aceLineCount += 1
       applyAce(facts, ace)
     }
   }
@@ -149,6 +177,8 @@ export function parsePackageAuthorityAces(
   return facts
 }
 
+/** Counts sum across targets; SIDs and booleans collapse. Callers must name the
+ *  summed fields so a report is not read as a single DACL. */
 export function mergePackageAuthorityAceFacts(
   all: PackageAuthorityAceFacts[]
 ): PackageAuthorityAceFacts {
@@ -159,9 +189,12 @@ export function mergePackageAuthorityAceFacts(
     merged.capabilitySidCount += facts.capabilitySidCount
     merged.inheritedPackageAceCount += facts.inheritedPackageAceCount
     merged.explicitPackageAceCount += facts.explicitPackageAceCount
+    merged.aceLineCount += facts.aceLineCount
+    merged.outputLineCount += facts.outputLineCount
     merged.hasAllApplicationPackages ||= facts.hasAllApplicationPackages
     merged.hasAllRestrictedAppPackages ||= facts.hasAllRestrictedAppPackages
     merged.friendlyNameFallbackUsed ||= facts.friendlyNameFallbackUsed
+    merged.englishSystemPrincipalSeen ||= facts.englishSystemPrincipalSeen
     // Any single poisoned target is enough: the repro showed DLL-only pollution
     // killing the renderer while the directory object alone was harmless.
     merged.matchesPoisonSignature ||= facts.matchesPoisonSignature

@@ -50,7 +50,7 @@ describe('crash breadcrumb store', () => {
   })
 
   it('caps retained high-water profiles', () => {
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 6; index += 1) {
       recordCrashBreadcrumb('renderer_memory_highwater', {
         rendererSurface: `surface-${index}`,
         thresholdPct: 80
@@ -59,7 +59,27 @@ describe('crash breadcrumb store', () => {
 
     expect(
       getCrashBreadcrumbSnapshot().map((breadcrumb) => breadcrumb.data?.rendererSurface)
-    ).toEqual(['surface-1', 'surface-2', 'surface-3', 'surface-4'])
+    ).toEqual(['surface-1', 'surface-2', 'surface-3', 'surface-4', 'surface-5'])
+  })
+
+  // The install-dir DACL crumb is emitted once at startup but explains crashes
+  // at any later point, so the FIFO ring must not evict it.
+  it('retains the windows install-dir ACL crumb and replaces its in-flight marker', () => {
+    recordCrashBreadcrumb('windows_install_dir_acl', { status: 'started' })
+    recordCrashBreadcrumb('windows_install_dir_acl', {
+      status: 'complete',
+      matchesPoisonSignature: true
+    })
+    for (let index = 0; index < 40; index += 1) {
+      recordCrashBreadcrumb('renderer_memory', { index })
+    }
+
+    const retained = getCrashBreadcrumbSnapshot().filter(
+      (breadcrumb) => breadcrumb.name === 'windows_install_dir_acl'
+    )
+
+    expect(retained).toHaveLength(1)
+    expect(retained[0].data).toEqual({ status: 'complete', matchesPoisonSignature: true })
   })
 
   it('redacts sensitive breadcrumb fields before they can be snapshotted', () => {

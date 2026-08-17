@@ -4,10 +4,12 @@ import {
   type CrashReportBreadcrumbData,
   type CrashReportBreadcrumb
 } from '../../shared/crash-reporting'
+import { WINDOWS_INSTALL_DIR_ACL_BREADCRUMB } from '../startup/windows-install-dir-acl-breadcrumb-fields'
 
 const MAX_BREADCRUMBS = 30
-// Why: retain two thresholds for each renderer surface without growing the ring.
-const MAX_RETAINED_BREADCRUMBS = 4
+// Why: retain two thresholds for each renderer surface without growing the ring,
+// plus one slot for the once-per-launch install-dir ACL crumb below.
+const MAX_RETAINED_BREADCRUMBS = 5
 // Why: coalesceKey embeds an open-string agentType (length-trimmed only, never
 // enum-checked), so the key space is unbounded over a long multi-agent/SSH session.
 // Bound the coalesce map the same way ProcessGoneDedupe bounds its key map.
@@ -37,6 +39,13 @@ let retainedBreadcrumbs = new Map<string, CrashReportBreadcrumb>()
 let coalescedBreadcrumbs = new Map<string, CoalescedBreadcrumbState>()
 
 function retainedBreadcrumbKey(breadcrumb: CrashReportBreadcrumb): string | null {
+  // Why: emitted once at startup, so the FIFO ring would evict it long before a
+  // later crash — yet the install tree's DACL explains crashes at any point in
+  // the session. Keyed on name alone so the in-flight marker is replaced by the
+  // result instead of costing a second slot.
+  if (breadcrumb.name === WINDOWS_INSTALL_DIR_ACL_BREADCRUMB) {
+    return breadcrumb.name
+  }
   if (breadcrumb.name !== 'renderer_memory_highwater') {
     return null
   }

@@ -4,13 +4,18 @@ import { release } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { CrashReportBreadcrumbData } from '../../shared/crash-reporting'
 import { sanitizeCrashReportString } from '../../shared/crash-reporting'
+import { recordCrashBreadcrumb } from '../crash-reporting/crash-breadcrumb-store'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
-import { getIcaclsExePath } from '../win32-utils'
+import { readTargetDacl } from './windows-dacl-icacls-reader'
 import {
-  mergePackageAuthorityAceFacts,
-  parsePackageAuthorityAces,
-  type PackageAuthorityAceFacts
-} from './windows-package-authority-aces'
+  rollupFields,
+  targetFields,
+  WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
+  type ProbeContext,
+  type TargetKey,
+  type TargetOutcome
+} from './windows-install-dir-acl-breadcrumb-fields'
+import { classifyInstallPath } from './windows-install-path-class'
 
 /**
  * Read-only DACL probe of the win32 install directory.
@@ -23,21 +28,12 @@ import {
  * present. We have no evidence a crashing machine is in that state — this
  * breadcrumb is how we find out, riding along with the next such crash via the
  * retained breadcrumb ring that process-gone-recorder already snapshots.
- *
- * Read-only by construction: the only argv ever passed to icacls is the target
- * path. No /grant, /deny, /reset, /setowner — and never /T, because a recursive
- * walk on a real profile measured 62s (see windows-user-data-acl.ts).
  */
 
-export const WINDOWS_INSTALL_DIR_ACL_BREADCRUMB = 'windows_install_dir_acl'
+export { WINDOWS_INSTALL_DIR_ACL_BREADCRUMB }
 
-/** Whole-probe budget; a diagnostic must never be felt at startup. */
+/** Whole-probe budget across every icacls call; a diagnostic must never be felt at startup. */
 const PROBE_BUDGET_MS = 5_000
-// Why: an unresolved S-1-15-2-<hash> derives from a package moniker, so it hints
-// at installed software. Correlating the same SID across reports is exactly what
-// identifies the polluting tool, which is the diagnostic value — so keep the raw
-// form but cap the count and sanitize it.
-const MAX_REPORTED_SIDS = 3
 
 /** Electron ships these next to the exe; first hit wins, no globbing. */
 const MODULE_SHORTLIST = [
@@ -49,17 +45,6 @@ const MODULE_SHORTLIST = [
 ]
 const RESOURCE_SHORTLIST = ['icudtl.dat', 'resources.pak', 'chrome_100_percent.pak']
 
-export type InstallPathClass =
-  | 'localappdata-programs'
-  | 'program-files'
-  | 'program-files-x86'
-  | 'appdata-roaming'
-  | 'other'
-
-type TargetKey = 'installDir' | 'moduleFile' | 'resourceFile'
-
-type TargetOutcome = { facts: PackageAuthorityAceFacts } | { reason: string }
-
 export type WindowsInstallDirAclProbeOptions = {
   /** Test seam — defaults to node:child_process spawn. */
   spawnFn?: typeof spawn
@@ -70,43 +55,13 @@ export type WindowsInstallDirAclProbeOptions = {
   env?: NodeJS.ProcessEnv
   osRelease?: () => string
   gpuFallbackActive?: boolean
+  /** Test seam — defaults to PROBE_BUDGET_MS. */
+  budgetMs?: number
   /** Test seam — defaults to a non-recursive readdir of the install dir. */
   listInstallDirEntries?: (dir: string) => Promise<string[]>
+  recordStartBreadcrumb?: (name: string, data: CrashReportBreadcrumbData) => void
   recordBreadcrumb?: (name: string, data: CrashReportBreadcrumbData) => void
   onDone?: (data: CrashReportBreadcrumbData) => void
-}
-
-function normalizeDir(value: string | undefined): string | null {
-  const trimmed = value?.trim()
-  return trimmed
-    ? trimmed
-        .replace(/[\\/]+$/, '')
-        .replace(/\//g, '\\')
-        .toLowerCase()
-    : null
-}
-
-export function classifyInstallPath(
-  installDir: string,
-  env: NodeJS.ProcessEnv = process.env
-): InstallPathClass {
-  const target = normalizeDir(installDir)
-  if (!target) {
-    return 'other'
-  }
-  const localAppData = normalizeDir(env.LOCALAPPDATA)
-  const candidates: [string | null, InstallPathClass][] = [
-    [localAppData ? `${localAppData}\\programs` : null, 'localappdata-programs'],
-    [normalizeDir(env['ProgramFiles(x86)']), 'program-files-x86'],
-    [normalizeDir(env.ProgramW6432 ?? env.ProgramFiles), 'program-files'],
-    [normalizeDir(env.APPDATA), 'appdata-roaming']
-  ]
-  for (const [root, klass] of candidates) {
-    if (root && (target === root || target.startsWith(`${root}\\`))) {
-      return klass
-    }
-  }
-  return 'other'
 }
 
 function pickFile(entries: string[], shortlist: string[], extensions: string[]): string | null {
@@ -129,172 +84,84 @@ async function listTopLevelEntries(dir: string): Promise<string[]> {
   return entries.filter((entry) => entry.isFile()).map((entry) => entry.name)
 }
 
-function runIcacls(
-  spawnFn: typeof spawn,
-  target: string,
-  timeoutMs: number
-): Promise<{ stdout: string } | { reason: string }> {
+type Selection = { moduleFile: string | null; resourceFile: string | null; reason?: string }
+
+const NO_SELECTION = (reason: string): Selection => ({
+  moduleFile: null,
+  resourceFile: null,
+  reason
+})
+
+/**
+ * Why the race: a dead SMB share or stalled removable install root can hang
+ * readdir forever, and an unraced listing would mean no breadcrumb at all.
+ */
+async function selectTargets(
+  installDir: string,
+  listEntries: (dir: string) => Promise<string[]>,
+  deadline: number
+): Promise<Selection> {
+  const listed = listEntries(installDir).then(
+    (entries): Selection => ({
+      moduleFile: pickFile(entries, MODULE_SHORTLIST, ['.dll']),
+      resourceFile: pickFile(entries, RESOURCE_SHORTLIST, ['.pak', '.dat'])
+    }),
+    (error: unknown) => NO_SELECTION(`readdir: ${String(error)}`)
+  )
+  return Promise.race([listed, budgetElapsed(deadline).then(() => NO_SELECTION('readdir-timeout'))])
+}
+
+function budgetElapsed(deadline: number): Promise<void> {
   return new Promise((resolve) => {
-    let child: ReturnType<typeof spawn>
-    try {
-      // The entire argv: one path, zero flags. Read-only, non-recursive.
-      child = spawnFn(getIcaclsExePath(), [target], {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        windowsHide: true
-      })
-    } catch (error) {
-      resolve({ reason: `spawn: ${String(error)}` })
-      return
-    }
-    let stdout = ''
-    let settled = false
-    const settle = (result: { stdout: string } | { reason: string }): void => {
-      if (settled) {
-        return
-      }
-      settled = true
-      clearTimeout(timer)
-      resolve(result)
-    }
-    const timer = setTimeout(
-      () => {
-        child.kill()
-        settle({ reason: 'timeout' })
-      },
-      Math.max(timeoutMs, 1)
-    )
+    const timer = setTimeout(resolve, Math.max(deadline - Date.now(), 1))
     timer.unref?.()
-    child.stdout?.setEncoding('utf-8')
-    child.stdout?.on('data', (chunk: string) => {
-      stdout += chunk
-    })
-    child.on('error', (error) => settle({ reason: `spawn: ${error.message}` }))
-    // Why 'close' not 'exit': 'exit' can fire before stdout has been drained,
-    // which would silently parse an empty DACL as a clean one.
-    child.on('close', (code) =>
-      settle(code === 0 ? { stdout } : { reason: `exit ${String(code)}` })
-    )
   })
 }
 
-async function probeTarget(
-  spawnFn: typeof spawn,
-  target: string,
-  deadline: number
-): Promise<TargetOutcome> {
-  const remaining = deadline - Date.now()
-  if (remaining <= 0) {
-    return { reason: 'budget-exhausted' }
-  }
-  const result = await runIcacls(spawnFn, target, remaining)
-  if ('reason' in result) {
-    return result
-  }
-  return { facts: parsePackageAuthorityAces(result.stdout, target) }
-}
-
-function targetFields(key: TargetKey, outcome: TargetOutcome | null): CrashReportBreadcrumbData {
-  if (!outcome) {
-    return { [`${key}Reason`]: 'not-found' }
-  }
-  if ('reason' in outcome) {
-    return { [`${key}Reason`]: sanitizeCrashReportString(outcome.reason, 200) }
-  }
-  const { facts } = outcome
-  return {
-    [`${key}PackageAceCount`]: facts.packageAceCount,
-    [`${key}UnresolvedPackageSidCount`]: facts.unresolvedPackageSidCount,
-    [`${key}CapabilitySidCount`]: facts.capabilitySidCount,
-    [`${key}InheritedPackageAceCount`]: facts.inheritedPackageAceCount,
-    [`${key}HasAllApplicationPackages`]: facts.hasAllApplicationPackages,
-    [`${key}HasAllRestrictedAppPackages`]: facts.hasAllRestrictedAppPackages,
-    [`${key}MatchesPoisonSignature`]: facts.matchesPoisonSignature
-  }
-}
-
-function rollupFields(
-  outcomes: (TargetOutcome | null)[],
-  context: { installPathClass: InstallPathClass; windowsBuild: string; gpuFallback: boolean }
-): CrashReportBreadcrumbData {
-  const facts = mergePackageAuthorityAceFacts(
-    outcomes.flatMap((outcome) => (outcome && 'facts' in outcome ? [outcome.facts] : []))
-  )
-  return {
-    probedTargetCount: outcomes.filter((outcome) => outcome && 'facts' in outcome).length,
-    packageAceCount: facts.packageAceCount,
-    hasAllApplicationPackages: facts.hasAllApplicationPackages,
-    hasAllRestrictedAppPackages: facts.hasAllRestrictedAppPackages,
-    unresolvedPackageSidCount: facts.unresolvedPackageSidCount,
-    unresolvedPackageSids: sanitizeCrashReportString(
-      facts.unresolvedPackageSids.slice(0, MAX_REPORTED_SIDS).join(' '),
-      400
-    ),
-    capabilitySidCount: facts.capabilitySidCount,
-    inheritedPackageAceCount: facts.inheritedPackageAceCount,
-    explicitPackageAceCount: facts.explicitPackageAceCount,
-    friendlyNameFallbackUsed: facts.friendlyNameFallbackUsed,
-    matchesPoisonSignature: facts.matchesPoisonSignature,
-    installPathClass: context.installPathClass,
-    windowsBuild: sanitizeCrashReportString(context.windowsBuild, 60),
-    // Why: an already-fallen-back launch has no GPU child at all, which changes
-    // what the absence of a GPU crash means in a field report.
-    gpuFallbackActiveThisLaunch: context.gpuFallback
-  }
-}
-
-async function selectTargets(
+async function probeTargets(
+  options: WindowsInstallDirAclProbeOptions,
   installDir: string,
-  listEntries: (dir: string) => Promise<string[]>
-): Promise<{ moduleFile: string | null; resourceFile: string | null; reason?: string }> {
-  try {
-    const entries = await listEntries(installDir)
-    return {
-      moduleFile: pickFile(entries, MODULE_SHORTLIST, ['.dll']),
-      resourceFile: pickFile(entries, RESOURCE_SHORTLIST, ['.pak', '.dat'])
-    }
-  } catch (error) {
-    return { moduleFile: null, resourceFile: null, reason: `readdir: ${String(error)}` }
+  deadline: number
+): Promise<{ outcomes: [TargetKey, TargetOutcome | null][]; reason?: string }> {
+  const spawnFn = options.spawnFn ?? spawn
+  // Why start this first: the install dir needs no listing, so a pathological
+  // readdir degrades to a partial breadcrumb instead of starving every target.
+  const installDirRead = readTargetDacl(spawnFn, installDir, deadline)
+  const selection = await selectTargets(
+    installDir,
+    options.listInstallDirEntries ?? listTopLevelEntries,
+    deadline
+  )
+  const readChild = (name: string | null): Promise<TargetOutcome> | null =>
+    name ? readTargetDacl(spawnFn, join(installDir, name), deadline) : null
+  const [installDirOutcome, moduleFile, resourceFile] = await Promise.all([
+    installDirRead,
+    readChild(selection.moduleFile),
+    readChild(selection.resourceFile)
+  ])
+  return {
+    outcomes: [
+      ['installDir', installDirOutcome],
+      ['moduleFile', moduleFile],
+      ['resourceFile', resourceFile]
+    ],
+    reason: selection.reason
   }
 }
 
 async function runProbe(options: WindowsInstallDirAclProbeOptions): Promise<void> {
-  const env = options.env ?? process.env
   const installDir = options.installDir ?? dirname(process.execPath)
-  const spawnFn = options.spawnFn ?? spawn
-  const listEntries = options.listInstallDirEntries ?? listTopLevelEntries
-  const deadline = Date.now() + PROBE_BUDGET_MS
-  const selection = await selectTargets(installDir, listEntries)
-  const outcomes: [TargetKey, TargetOutcome | null][] = [
-    ['installDir', await probeTarget(spawnFn, installDir, deadline)],
-    [
-      'moduleFile',
-      selection.moduleFile
-        ? await probeTarget(spawnFn, join(installDir, selection.moduleFile), deadline)
-        : null
-    ],
-    [
-      'resourceFile',
-      selection.resourceFile
-        ? await probeTarget(spawnFn, join(installDir, selection.resourceFile), deadline)
-        : null
-    ]
-  ]
+  const deadline = Date.now() + (options.budgetMs ?? PROBE_BUDGET_MS)
+  const { outcomes, reason } = await probeTargets(options, installDir, deadline)
   const data: CrashReportBreadcrumbData = {
     ...rollupFields(
       outcomes.map(([, outcome]) => outcome),
-      {
-        installPathClass: classifyInstallPath(installDir, env),
-        windowsBuild: (options.osRelease ?? release)(),
-        gpuFallback: options.gpuFallbackActive === true
-      }
+      { ...probeContext(options, installDir), reason }
     ),
     ...outcomes.reduce<CrashReportBreadcrumbData>(
       (acc, [key, outcome]) => Object.assign(acc, targetFields(key, outcome)),
       {}
     )
-  }
-  if (selection.reason) {
-    data.reason = sanitizeCrashReportString(selection.reason, 200)
   }
   ;(options.recordBreadcrumb ?? recordDurableCrashBreadcrumb)(
     WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
@@ -303,8 +170,25 @@ async function runProbe(options: WindowsInstallDirAclProbeOptions): Promise<void
   options.onDone?.(data)
 }
 
-// Why: openMainWindow runs again on dock/tray re-activation, and the install
-// tree's DACL cannot change mid-process in a way worth a second breadcrumb.
+function probeContext(options: WindowsInstallDirAclProbeOptions, installDir: string): ProbeContext {
+  return {
+    installPathClass: classifyInstallPath(installDir, options.env ?? process.env),
+    windowsBuild: (options.osRelease ?? release)(),
+    gpuFallbackActive: options.gpuFallbackActive === true
+  }
+}
+
+function startMarkerFields(context: ProbeContext): CrashReportBreadcrumbData {
+  return {
+    status: 'started',
+    installPathClass: context.installPathClass,
+    windowsBuild: sanitizeCrashReportString(context.windowsBuild, 60),
+    gpuFallbackActiveThisLaunch: context.gpuFallbackActive
+  }
+}
+
+// Why: the probe runs once per process; a second call would cost spawns for a
+// DACL that cannot meaningfully change mid-process.
 let probeStarted = false
 
 export function resetWindowsInstallDirAclProbeForTest(): void {
@@ -312,8 +196,8 @@ export function resetWindowsInstallDirAclProbeForTest(): void {
 }
 
 /**
- * Fire-and-forget: returns before any spawn happens and can never delay window
- * creation. win32 only; no spawn and no fs I/O on other platforms.
+ * Fire-and-forget: returns before any spawn happens and can never delay startup.
+ * win32 only; no spawn and no fs I/O on other platforms.
  */
 export function probeWindowsInstallDirAcl(options: WindowsInstallDirAclProbeOptions = {}): void {
   if ((options.platform ?? process.platform) !== 'win32' || options.isServeMode === true) {
@@ -323,11 +207,25 @@ export function probeWindowsInstallDirAcl(options: WindowsInstallDirAclProbeOpti
     return
   }
   probeStarted = true
-  void runProbe(options).catch((error: unknown) => {
+  // Why: children can die inside the window before icacls returns, and
+  // ProcessGoneDedupe keeps only the first report of a burst. This synchronous
+  // marker occupies the same retained slot the result later replaces, so a
+  // report taken in that window says "probe in flight" rather than nothing —
+  // which is otherwise indistinguishable from an old build or a non-win32 host.
+  ;(options.recordStartBreadcrumb ?? recordCrashBreadcrumb)(
+    WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
+    startMarkerFields(probeContext(options, options.installDir ?? dirname(process.execPath)))
+  )
+  // Why setImmediate: even spawning is deferred past the caller, so nothing on
+  // the startup path pays for this, not even three CreateProcess calls.
+  const deferred = new Promise<void>((resolve) => {
+    setImmediate(() => resolve(runProbe(options)))
+  })
+  void deferred.catch((error: unknown) => {
     // Never throw out of a diagnostic; a failed probe still says something.
     ;(options.recordBreadcrumb ?? recordDurableCrashBreadcrumb)(
       WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
-      { reason: sanitizeCrashReportString(`probe: ${String(error)}`, 200) }
+      { status: 'failed', reason: sanitizeCrashReportString(`probe: ${String(error)}`, 200) }
     )
     options.onDone?.({ reason: 'probe-error' })
   })

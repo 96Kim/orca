@@ -2,14 +2,17 @@ import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { CrashReportBreadcrumbData } from '../../shared/crash-reporting'
 import {
-  classifyInstallPath,
+  sanitizeCrashReportDetails,
+  type CrashReportBreadcrumbData
+} from '../../shared/crash-reporting'
+import {
   probeWindowsInstallDirAcl,
   resetWindowsInstallDirAclProbeForTest,
   WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
   type WindowsInstallDirAclProbeOptions
 } from './windows-install-dir-acl-probe'
+import { classifyInstallPath } from './windows-install-path-class'
 import { parsePackageAuthorityAces } from './windows-package-authority-aces'
 
 const INSTALL_DIR = 'C:\\Users\\neil\\AppData\\Local\\Programs\\orca'
@@ -60,6 +63,17 @@ const CAPABILITY_ONLY = (target: string): string =>
 Successfully processed 1 files; Failed processing 0 files
 `
 
+// German-shaped icacls output: every principal, including the well-known
+// package grant, is localized so no name regex can fire.
+const LOCALIZED_ORPHAN_PLUS_GRANT = (target: string): string =>
+  `${target} ANWENDUNGSPAKETAUTORITÄT\\ALLE ANWENDUNGSPAKETE:(OI)(CI)(RX)
+                    S-1-15-2-999-999-999:(I)(OI)(CI)(F)
+                    NT-AUTORITÄT\\SYSTEM:(I)(OI)(CI)(F)
+                    VORDEFINIERT\\Administratoren:(I)(OI)(CI)(F)
+
+Erfolgreich verarbeitete Dateien: 1; bei 0 Dateien ist ein Verarbeitungsfehler aufgetreten.
+`
+
 type SpawnCall = { command: string; args: string[] }
 
 type FakeSpawn = {
@@ -102,6 +116,14 @@ function createFakeSpawn(
   return { calls, spawnFn: spawnFn as unknown as WindowsInstallDirAclProbeOptions['spawnFn'] }
 }
 
+const never = (): Promise<never> => new Promise(() => undefined)
+
+/** Let every pending microtask, timer and immediate the probe could use run. */
+async function settleEventLoop(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
 function runProbe(
   options: WindowsInstallDirAclProbeOptions
 ): Promise<{ name: string; data: CrashReportBreadcrumbData }> {
@@ -112,6 +134,7 @@ function runProbe(
       env: { LOCALAPPDATA: 'C:\\Users\\neil\\AppData\\Local' },
       osRelease: () => '10.0.26200',
       listInstallDirEntries: async () => ENTRIES,
+      recordStartBreadcrumb: () => undefined,
       ...options,
       recordBreadcrumb: (name, data) => resolve({ name, data })
     })
@@ -132,19 +155,24 @@ describe('probeWindowsInstallDirAcl', () => {
   it('reports a clean DACL as unpoisoned', async () => {
     const { name, data } = await probeWithOutput(CLEAN)
     expect(name).toBe(WINDOWS_INSTALL_DIR_ACL_BREADCRUMB)
+    expect(data.status).toBe('complete')
     expect(data.matchesPoisonSignature).toBe(false)
-    expect(data.packageAceCount).toBe(0)
+    expect(data.packageAceCountAcrossTargets).toBe(0)
     expect(data.unresolvedPackageSidCount).toBe(0)
     expect(data.probedTargetCount).toBe(3)
+    expect(data.aceLineCountAcrossTargets).toBe(9)
+    expect(data.wellKnownNameDetectionReliable).toBe(true)
     expect(data.installPathClass).toBe('localappdata-programs')
     expect(data.windowsBuild).toBe('10.0.26200')
+    expect(data.reason).toBeUndefined()
   })
 
   it('flags an orphan package SID with no well-known package SID present', async () => {
     const { data } = await probeWithOutput(ORPHAN)
     expect(data.matchesPoisonSignature).toBe(true)
     expect(data.unresolvedPackageSidCount).toBe(1)
-    expect(data.unresolvedPackageSids).toBe('S-1-15-2-999-999-999')
+    expect(data.unresolvedPackageSid0).toBe('S-1-15-2-999-999-999')
+    expect(data.unresolvedPackageSid1).toBeUndefined()
     expect(data.hasAllApplicationPackages).toBe(false)
     expect(data.hasAllRestrictedAppPackages).toBe(false)
     expect(data.installDirMatchesPoisonSignature).toBe(true)
@@ -170,26 +198,32 @@ describe('probeWindowsInstallDirAcl', () => {
   it('counts capability SIDs separately and does not flag them', async () => {
     const { data } = await probeWithOutput(CAPABILITY_ONLY)
     expect(data.matchesPoisonSignature).toBe(false)
-    expect(data.capabilitySidCount).toBe(3)
-    expect(data.packageAceCount).toBe(0)
+    expect(data.capabilitySidCountAcrossTargets).toBe(3)
+    expect(data.packageAceCountAcrossTargets).toBe(0)
   })
 
   it('distinguishes inherited from explicit package ACEs', async () => {
     const { data } = await probeWithOutput(ORPHAN_PLUS_RESTRICTED)
     // Per target: one explicit (OI)(CI)(RX) grant, one inherited orphan.
-    expect(data.inheritedPackageAceCount).toBe(3)
-    expect(data.explicitPackageAceCount).toBe(3)
+    expect(data.inheritedPackageAceCountAcrossTargets).toBe(3)
+    expect(data.explicitPackageAceCountAcrossTargets).toBe(3)
     expect(data.installDirInheritedPackageAceCount).toBe(1)
+  })
+
+  // A localized icacls prints no recognizable well-known package name, so the
+  // poison verdict must be marked unreliable rather than trusted.
+  it('marks well-known-name detection unreliable when icacls output is localized', async () => {
+    const { data } = await probeWithOutput(LOCALIZED_ORPHAN_PLUS_GRANT)
+    expect(data.wellKnownNameDetectionReliable).toBe(false)
+    expect(data.unresolvedPackageSidCount).toBe(1)
   })
 
   it('probes only the install dir plus one dll and one resource file, with no flags', async () => {
     const fake = createFakeSpawn((target) => ({ stdout: CLEAN(target) }))
     await runProbe({ spawnFn: fake.spawnFn })
-    expect(fake.calls.map((call) => call.args)).toEqual([
-      [INSTALL_DIR],
-      [join(INSTALL_DIR, 'ffmpeg.dll')],
-      [join(INSTALL_DIR, 'icudtl.dat')]
-    ])
+    expect(fake.calls.map((call) => call.args).sort()).toEqual(
+      [[INSTALL_DIR], [join(INSTALL_DIR, 'ffmpeg.dll')], [join(INSTALL_DIR, 'icudtl.dat')]].sort()
+    )
     for (const call of fake.calls) {
       expect(call.args).toHaveLength(1)
       expect(call.command.toLowerCase()).toContain('icacls.exe')
@@ -206,7 +240,9 @@ describe('probeWindowsInstallDirAcl', () => {
     })
     expect(data.probedTargetCount).toBe(0)
     expect(data.installDirReason).toBe('exit 5')
-    expect(data.matchesPoisonSignature).toBe(false)
+    // Nothing was measured, so the headline verdict must not read as "clean".
+    expect(data.matchesPoisonSignature).toBeNull()
+    expect(data.reason).toBe('all-targets-failed')
   })
 
   it('records a reason when the spawn itself errors', async () => {
@@ -217,13 +253,33 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.moduleFileReason).toBe('spawn: ENOENT')
   })
 
-  it('emits a breadcrumb with a timeout reason when icacls never exits', async () => {
+  it('spends one shared budget across every icacls call, not one per target', async () => {
+    const budgetMs = 500
+    const startedAt = Date.now()
     const { data } = await runProbe({
-      spawnFn: createFakeSpawn(() => ({ hang: true })).spawnFn
+      spawnFn: createFakeSpawn(() => ({ hang: true })).spawnFn,
+      budgetMs
     })
+    const elapsed = Date.now() - startedAt
     expect(data.installDirReason).toBe('timeout')
+    expect(data.moduleFileReason).toBe('timeout')
+    expect(data.resourceFileReason).toBe('timeout')
     expect(data.probedTargetCount).toBe(0)
-  }, 20_000)
+    // A per-target budget would take 3x this; concurrency plus one deadline is 1x.
+    expect(elapsed).toBeLessThan(budgetMs * 2)
+  })
+
+  it('still reports the install dir when listing it never resolves', async () => {
+    const { data } = await runProbe({
+      spawnFn: createFakeSpawn((target) => ({ stdout: ORPHAN(target) })).spawnFn,
+      listInstallDirEntries: never,
+      budgetMs: 300
+    })
+    expect(data.reason).toBe('readdir-timeout')
+    expect(data.probedTargetCount).toBe(1)
+    expect(data.installDirMatchesPoisonSignature).toBe(true)
+    expect(data.moduleFileReason).toBe('not-found')
+  })
 
   it('records not-found when no dll or resource file exists in the install dir', async () => {
     const { data } = await runProbe({
@@ -246,34 +302,92 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.probedTargetCount).toBe(1)
   })
 
-  it('never spawns off win32', () => {
+  it('records an in-flight marker synchronously, before the first spawn', () => {
+    const fake = createFakeSpawn((target) => ({ stdout: CLEAN(target) }))
+    const started: { name: string; data: CrashReportBreadcrumbData }[] = []
+    probeWindowsInstallDirAcl({
+      platform: 'win32',
+      installDir: INSTALL_DIR,
+      env: { LOCALAPPDATA: 'C:\\Users\\neil\\AppData\\Local' },
+      osRelease: () => '10.0.26200',
+      spawnFn: fake.spawnFn,
+      listInstallDirEntries: async () => ENTRIES,
+      recordStartBreadcrumb: (name, data) => started.push({ name, data }),
+      recordBreadcrumb: () => undefined
+    })
+    expect(started).toEqual([
+      {
+        name: WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
+        data: {
+          status: 'started',
+          installPathClass: 'localappdata-programs',
+          windowsBuild: '10.0.26200',
+          gpuFallbackActiveThisLaunch: false
+        }
+      }
+    ])
+    expect(fake.calls).toHaveLength(0)
+  })
+
+  it('never spawns, reads the filesystem or records anything off win32', async () => {
     const fake = createFakeSpawn(() => ({ stdout: '' }))
-    let recorded = false
+    const events: string[] = []
     probeWindowsInstallDirAcl({
       platform: 'darwin',
       installDir: INSTALL_DIR,
       spawnFn: fake.spawnFn,
       listInstallDirEntries: async () => {
+        events.push('readdir')
         throw new Error('must not read the filesystem off win32')
       },
-      recordBreadcrumb: () => {
-        recorded = true
-      }
+      recordStartBreadcrumb: () => events.push('start'),
+      recordBreadcrumb: () => events.push('record'),
+      onDone: () => events.push('done')
     })
-    expect(fake.calls).toHaveLength(0)
-    expect(recorded).toBe(false)
+    await settleEventLoop()
+    expect(fake.calls).toEqual([])
+    expect(events).toEqual([])
   })
 
-  it('never spawns in serve mode', () => {
+  it('never spawns, reads the filesystem or records anything in serve mode', async () => {
     const fake = createFakeSpawn(() => ({ stdout: '' }))
+    const events: string[] = []
     probeWindowsInstallDirAcl({
       platform: 'win32',
       isServeMode: true,
       installDir: INSTALL_DIR,
       spawnFn: fake.spawnFn,
-      recordBreadcrumb: () => undefined
+      listInstallDirEntries: async () => {
+        events.push('readdir')
+        throw new Error('must not read the filesystem in serve mode')
+      },
+      recordStartBreadcrumb: () => events.push('start'),
+      recordBreadcrumb: () => events.push('record'),
+      onDone: () => events.push('done')
     })
-    expect(fake.calls).toHaveLength(0)
+    await settleEventLoop()
+    expect(fake.calls).toEqual([])
+    expect(events).toEqual([])
+  })
+
+  // One key per SID: sanitizeCrashReportDetails re-truncates every string detail
+  // at 240 chars, so a joined list of real ~84-char SIDs loses the third
+  // mid-value — and a mangled SID cannot be correlated across reports.
+  it('keeps capped unresolved SIDs intact through the breadcrumb sanitizer', async () => {
+    const sids = [0, 1, 2, 3].map(
+      (index) =>
+        `S-1-15-2-${index}953${index}47845-2214654456-2652434443-${index}42${index}30${index}39-4045166157-2001573463-3053417338`
+    )
+    const { data } = await probeWithOutput(
+      (target) =>
+        `${target} ${sids.map((sid) => `${sid}:(I)(OI)(CI)(F)`).join('\n                    ')}\n`
+    )
+    const sanitized = sanitizeCrashReportDetails(data)
+    expect(sanitized.unresolvedPackageSidCount).toBe(4)
+    expect(sanitized.unresolvedPackageSid0).toBe(sids[0])
+    expect(sanitized.unresolvedPackageSid1).toBe(sids[1])
+    expect(sanitized.unresolvedPackageSid2).toBe(sids[2])
+    expect(sanitized.unresolvedPackageSid3).toBeUndefined()
   })
 
   it('carries the GPU fallback state so a report without a GPU child is interpretable', async () => {
@@ -329,10 +443,34 @@ describe('parsePackageAuthorityAces', () => {
     expect(facts.matchesPoisonSignature).toBe(true)
   })
 
+  // icacls writes OEM-codepage bytes, so a non-ASCII profile name decodes to
+  // U+FFFD and the echo no longer matches the path we passed. The orphan is
+  // line 1 when inherited, so losing it would report a poisoned box as clean.
+  it('detects the orphan when the echoed target is mojibake', () => {
+    const facts = parsePackageAuthorityAces(
+      ORPHAN('C:\\Users\\J\uFFFDrg\\AppData\\Local\\Programs\\orca'),
+      'C:\\Users\\Jörg\\AppData\\Local\\Programs\\orca'
+    )
+    expect(facts.unresolvedPackageSids).toEqual(['S-1-15-2-999-999-999'])
+    expect(facts.inheritedPackageAceCount).toBe(1)
+    expect(facts.matchesPoisonSignature).toBe(true)
+  })
+
   it('ignores the trailing summary line and blank lines', () => {
     const facts = parsePackageAuthorityAces(CLEAN(INSTALL_DIR), INSTALL_DIR)
     expect(facts.packageAceCount).toBe(0)
     expect(facts.capabilitySidCount).toBe(0)
+    expect(facts.aceLineCount).toBe(3)
+  })
+
+  // aceLineCount separates a parse/format surprise from a genuinely clean DACL.
+  it('reports zero ACE lines but non-zero output lines when nothing parses', () => {
+    const facts = parsePackageAuthorityAces(
+      'orca: Access is denied.\nSuccessfully processed 0 files\n',
+      INSTALL_DIR
+    )
+    expect(facts.aceLineCount).toBe(0)
+    expect(facts.outputLineCount).toBe(2)
   })
 
   it('treats the well-known SIDs as satisfying even in raw SID form', () => {
@@ -344,6 +482,12 @@ describe('parsePackageAuthorityAces', () => {
     expect(facts.friendlyNameFallbackUsed).toBe(false)
     expect(facts.matchesPoisonSignature).toBe(false)
   })
+
+  it('sees no English system principal in localized output', () => {
+    const facts = parsePackageAuthorityAces(LOCALIZED_ORPHAN_PLUS_GRANT(INSTALL_DIR), INSTALL_DIR)
+    expect(facts.englishSystemPrincipalSeen).toBe(false)
+    expect(facts.unresolvedPackageSidCount).toBe(1)
+  })
 })
 
 describe('probe re-entry', () => {
@@ -351,7 +495,7 @@ describe('probe re-entry', () => {
     resetWindowsInstallDirAclProbeForTest()
   })
 
-  // openMainWindow runs again on re-activation; the second call must cost nothing.
+  // A second call must cost nothing: the DACL cannot change mid-process.
   it('spawns icacls only for the first call per process', async () => {
     const fake = createFakeSpawn((target) => ({ stdout: CLEAN(target) }))
     await runProbe({ spawnFn: fake.spawnFn })
@@ -361,6 +505,7 @@ describe('probe re-entry', () => {
       installDir: INSTALL_DIR,
       spawnFn: fake.spawnFn,
       listInstallDirEntries: async () => ENTRIES,
+      recordStartBreadcrumb: () => undefined,
       recordBreadcrumb: () => undefined
     })
     expect(fake.calls).toHaveLength(afterFirst)
@@ -393,6 +538,7 @@ describe('real icacls output', () => {
     expect(facts.packageAceCount).toBe(4)
     expect(facts.explicitPackageAceCount).toBe(4)
     expect(facts.unresolvedPackageSidCount).toBe(0)
+    expect(facts.englishSystemPrincipalSeen).toBe(true)
     expect(facts.matchesPoisonSignature).toBe(false)
   })
 })
