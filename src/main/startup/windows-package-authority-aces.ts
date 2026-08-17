@@ -44,6 +44,13 @@ const PACKAGE_FAMILY_NAME = /^[^\\/:*?"<>|\s][^\\/:*?"<>|]*_[a-z0-9]{13}$/i
 /** Capability authority: proven harmless in the repro, tracked to stay distinguishable. */
 const CAPABILITY_SID = /^S-1-15-3-[\d-]+$/i
 
+// Why: the repro was cleared by an ADDITIVE (OI)(CI)(RX) grant, so only an ACE
+// that actually grants on the probed object can satisfy an orphan. `(DENY)`
+// grants nothing, and `(IO)` (inherit-only) applies to children rather than to
+// this object — a hardened or EDR-managed box carrying either shape would
+// otherwise report a still-poisoned install tree as healthy.
+const NON_GRANTING_ACE_FLAGS = /\((?:DENY|IO)\)/i
+
 /** `principal:(FLAG)(FLAG)…` where the flag run is the whole line suffix. */
 const ACE_LINE = /^(.*):((?:\([^()]*\))+)\s*$/
 // Why: SIDs are pure ASCII, so this survives both a failed echo-strip and an OEM
@@ -56,8 +63,12 @@ export type PackageAuthorityAceFacts = {
   packageAceCount: number
   /** Package ACEs icacls resolved to a package family name, invisible to packageAceCount. */
   resolvedPackageAceCount: number
+  /** Only ACEs that grant on the probed object itself; see NON_GRANTING_ACE_FLAGS. */
   hasAllApplicationPackages: boolean
   hasAllRestrictedAppPackages: boolean
+  /** Well-known package ACEs excluded from the two flags above because they deny
+   *  or are inherit-only — kept visible so a field report can see they exist. */
+  nonGrantingWellKnownPackageAceCount: number
   unresolvedPackageSidCount: number
   unresolvedPackageSids: string[]
   capabilitySidCount: number
@@ -78,6 +89,7 @@ function emptyFacts(): PackageAuthorityAceFacts {
     resolvedPackageAceCount: 0,
     hasAllApplicationPackages: false,
     hasAllRestrictedAppPackages: false,
+    nonGrantingWellKnownPackageAceCount: 0,
     unresolvedPackageSidCount: 0,
     unresolvedPackageSids: [],
     capabilitySidCount: 0,
@@ -105,13 +117,21 @@ function stripEchoedTarget(line: string, target: string): string {
   return line
 }
 
-type ParsedAce = { principal: string; inherited: boolean }
+type ParsedAce = { principal: string; inherited: boolean; grantsOnThisObject: boolean }
+
+function parsedAce(principal: string, flags: string): ParsedAce {
+  return {
+    principal,
+    inherited: /\(I\)/.test(flags),
+    grantsOnThisObject: !NON_GRANTING_ACE_FLAGS.test(flags)
+  }
+}
 
 function parseAceLine(line: string, target: string): ParsedAce | null {
   // SID-anchored first: it needs neither the echo-strip nor a decodable path.
   const sidMatch = SID_ACE_LINE.exec(line.trimEnd())
   if (sidMatch) {
-    return { principal: sidMatch[1], inherited: /\(I\)/.test(sidMatch[2]) }
+    return parsedAce(sidMatch[1], sidMatch[2])
   }
   const match = ACE_LINE.exec(stripEchoedTarget(line.trim(), target).trim())
   if (!match) {
@@ -121,7 +141,7 @@ function parseAceLine(line: string, target: string): ParsedAce | null {
   if (!principal) {
     return null
   }
-  return { principal, inherited: /\(I\)/.test(match[2]) }
+  return parsedAce(principal, match[2])
 }
 
 function applyAce(facts: PackageAuthorityAceFacts, ace: ParsedAce): void {
@@ -149,6 +169,10 @@ function applyAce(facts: PackageAuthorityAceFacts, ace: ParsedAce): void {
     facts.explicitPackageAceCount += 1
   }
   if (isWellKnownSid || isFriendlyName) {
+    if (!ace.grantsOnThisObject) {
+      facts.nonGrantingWellKnownPackageAceCount += 1
+      return
+    }
     // Restricted first: "ALL APPLICATION PACKAGES" is not a substring of the
     // restricted name, but keeping the order explicit documents the intent.
     if (
@@ -209,6 +233,7 @@ export function mergePackageAuthorityAceFacts(
     merged.capabilitySidCount += facts.capabilitySidCount
     merged.inheritedPackageAceCount += facts.inheritedPackageAceCount
     merged.explicitPackageAceCount += facts.explicitPackageAceCount
+    merged.nonGrantingWellKnownPackageAceCount += facts.nonGrantingWellKnownPackageAceCount
     merged.aceLineCount += facts.aceLineCount
     merged.outputLineCount += facts.outputLineCount
     merged.hasAllApplicationPackages ||= facts.hasAllApplicationPackages

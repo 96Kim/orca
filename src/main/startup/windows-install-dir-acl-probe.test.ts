@@ -54,6 +54,26 @@ const ORPHAN_PLUS_ALL_APP_PACKAGES = (target: string): string =>
 Successfully processed 1 files; Failed processing 0 files
 `
 
+// A deny ACE for the well-known principal grants nothing, so the orphan is
+// still unsatisfied — the shape a hardening policy or an EDR agent leaves.
+const ORPHAN_PLUS_DENIED_ALL_APP_PACKAGES = (target: string): string =>
+  `${target} APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES:(DENY)(OI)(CI)(F)
+                    S-1-15-2-999-999-999:(I)(OI)(CI)(F)
+                    NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+`
+
+// Inherit-only: applies to children, never to this object, so it cannot
+// satisfy an orphan on the object the way the repro's (OI)(CI)(RX) grant did.
+const ORPHAN_PLUS_INHERIT_ONLY_RESTRICTED = (target: string): string =>
+  `${target} APPLICATION PACKAGE AUTHORITY\\ALL RESTRICTED APPLICATION PACKAGES:(OI)(CI)(IO)(GR,GE)
+                    S-1-15-2-999-999-999:(I)(OI)(CI)(F)
+                    NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+`
+
 const CAPABILITY_ONLY = (target: string): string =>
   `${target} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)
                     BUILTIN\\Administrators:(OI)(CI)(F)
@@ -158,6 +178,8 @@ function runProbe(
       uiLanguage: () => 'en-US',
       listInstallDirEntries: async () => ENTRIES,
       recordStartBreadcrumb: () => undefined,
+      recordDurableBreadcrumb: () => undefined,
+      whenTracerSinkReady: () => Promise.resolve(),
       ...options,
       recordBreadcrumb: (name, data) => resolve({ name, data })
     })
@@ -218,6 +240,22 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.matchesPoisonSignature).toBe(false)
     expect(data.hasAllApplicationPackages).toBe(true)
     expect(data.hasAllRestrictedAppPackages).toBe(false)
+  })
+
+  it('keeps the signature when the well-known package ACE is a deny', async () => {
+    const { data } = await probeWithOutput(ORPHAN_PLUS_DENIED_ALL_APP_PACKAGES)
+    expect(data.matchesPoisonSignature).toBe(true)
+    expect(data.hasAllApplicationPackages).toBe(false)
+    expect(data.nonGrantingWellKnownPackageAceCountAcrossTargets).toBe(3)
+    // Still a package ACE, just one that cannot satisfy the orphan.
+    expect(data.packageAceCountAcrossTargets).toBe(6)
+  })
+
+  it('keeps the signature when the well-known package ACE is inherit-only', async () => {
+    const { data } = await probeWithOutput(ORPHAN_PLUS_INHERIT_ONLY_RESTRICTED)
+    expect(data.matchesPoisonSignature).toBe(true)
+    expect(data.hasAllRestrictedAppPackages).toBe(false)
+    expect(data.nonGrantingWellKnownPackageAceCountAcrossTargets).toBe(3)
   })
 
   it('counts capability SIDs separately and does not flag them', async () => {
@@ -583,10 +621,112 @@ describe('parsePackageAuthorityAces', () => {
     expect(facts.matchesPoisonSignature).toBe(false)
   })
 
+  // The repro was cleared by an additive grant; a deny grants nothing, so a
+  // denied well-known SID must not read as "this box is satisfied".
+  it('does not let a denied well-known package SID satisfy an orphan', () => {
+    const facts = parsePackageAuthorityAces(
+      `${INSTALL_DIR} S-1-15-2-1:(DENY)(F)\nS-1-15-2-999:(I)(OI)(CI)(F)\n`,
+      INSTALL_DIR
+    )
+    expect(facts.hasAllApplicationPackages).toBe(false)
+    expect(facts.nonGrantingWellKnownPackageAceCount).toBe(1)
+    expect(facts.matchesPoisonSignature).toBe(true)
+  })
+
   it('sees no English system principal in localized output', () => {
     const facts = parsePackageAuthorityAces(LOCALIZED_ORPHAN_PLUS_GRANT(INSTALL_DIR), INSTALL_DIR)
     expect(facts.englishSystemPrincipalSeen).toBe(false)
     expect(facts.unresolvedPackageSidCount).toBe(1)
+  })
+})
+
+describe('durable emit ordering', () => {
+  beforeEach(() => {
+    resetWindowsInstallDirAclProbeForTest()
+  })
+
+  // startSpan is a no-op until initObservability installs the tracer sink, and
+  // that happens inside app.whenReady — long after this probe finishes. Emitting
+  // durably before then would drop the span, leaving no record of a launch that
+  // did not crash, i.e. no base rate for the poison shape.
+  it('records into the ring immediately and durably only once the tracer sink exists', async () => {
+    const events: string[] = []
+    let releaseSink: () => void = () => undefined
+    const sinkReady = new Promise<void>((resolve) => {
+      releaseSink = resolve
+    })
+    const fake = createFakeSpawn((target) => ({ stdout: ORPHAN(target) }))
+    await new Promise<void>((resolve) => {
+      probeWindowsInstallDirAcl({
+        platform: 'win32',
+        installDir: INSTALL_DIR,
+        spawnFn: fake.spawnFn,
+        listInstallDirEntries: async () => ENTRIES,
+        recordStartBreadcrumb: () => events.push('start'),
+        recordBreadcrumb: () => {
+          events.push('ring')
+          resolve()
+        },
+        recordDurableBreadcrumb: (_name, data) =>
+          events.push(`durable:${String(data.matchesPoisonSignature)}`),
+        whenTracerSinkReady: () => sinkReady
+      })
+    })
+    await settleEventLoop()
+    expect(events).toEqual(['start', 'ring'])
+    releaseSink()
+    await settleEventLoop()
+    expect(events).toEqual(['start', 'ring', 'durable:true'])
+  })
+})
+
+describe('synchronous call safety', () => {
+  beforeEach(() => {
+    resetWindowsInstallDirAclProbeForTest()
+  })
+
+  // The call site runs at main-process module scope, so a throw here would abort
+  // startup and no window would ever be created.
+  it('never throws out of the synchronous call and still probes when the start recorder fails', async () => {
+    const fake = createFakeSpawn((target) => ({ stdout: CLEAN(target) }))
+    const result = new Promise<CrashReportBreadcrumbData>((resolve) => {
+      expect(() =>
+        probeWindowsInstallDirAcl({
+          platform: 'win32',
+          installDir: INSTALL_DIR,
+          spawnFn: fake.spawnFn,
+          listInstallDirEntries: async () => ENTRIES,
+          whenTracerSinkReady: () => Promise.resolve(),
+          recordDurableBreadcrumb: () => undefined,
+          recordStartBreadcrumb: () => {
+            throw new Error('recorder exploded')
+          },
+          recordBreadcrumb: (_name, data) => resolve(data)
+        })
+      ).not.toThrow()
+    })
+    expect((await result).status).toBe('complete')
+  })
+
+  // Resolving it calls an Electron binding before app.whenReady, and the start
+  // marker discards the value anyway.
+  it('does not resolve the UI language on the synchronous path', () => {
+    const uiLanguageCalls: string[] = []
+    probeWindowsInstallDirAcl({
+      platform: 'win32',
+      installDir: INSTALL_DIR,
+      spawnFn: createFakeSpawn((target) => ({ stdout: CLEAN(target) })).spawnFn,
+      listInstallDirEntries: async () => ENTRIES,
+      uiLanguage: () => {
+        uiLanguageCalls.push('resolved')
+        return 'en-US'
+      },
+      recordStartBreadcrumb: () => undefined,
+      recordBreadcrumb: () => undefined,
+      recordDurableBreadcrumb: () => undefined,
+      whenTracerSinkReady: () => Promise.resolve()
+    })
+    expect(uiLanguageCalls).toEqual([])
   })
 })
 
@@ -637,6 +777,8 @@ describe('real icacls output', () => {
     expect(facts.hasAllRestrictedAppPackages).toBe(true)
     expect(facts.packageAceCount).toBe(4)
     expect(facts.explicitPackageAceCount).toBe(4)
+    // Two of the four are (IO): they grant on children, not on this directory.
+    expect(facts.nonGrantingWellKnownPackageAceCount).toBe(2)
     expect(facts.unresolvedPackageSidCount).toBe(0)
     expect(facts.englishSystemPrincipalSeen).toBe(true)
     expect(facts.matchesPoisonSignature).toBe(false)

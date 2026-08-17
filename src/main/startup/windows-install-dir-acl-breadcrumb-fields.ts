@@ -104,6 +104,10 @@ export function rollupFields(
     outputLineCountAcrossTargets: facts.outputLineCount,
     hasAllApplicationPackages: facts.hasAllApplicationPackages,
     hasAllRestrictedAppPackages: facts.hasAllRestrictedAppPackages,
+    // Why: a DENY or inherit-only well-known package ACE grants nothing on the
+    // probed object, so it never clears the verdict — but its presence changes
+    // how a report reads, e.g. enterprise hardening rather than an untouched box.
+    nonGrantingWellKnownPackageAceCountAcrossTargets: facts.nonGrantingWellKnownPackageAceCount,
     unresolvedPackageSidCount: facts.unresolvedPackageSidCount,
     ...unresolvedSidFields(facts.unresolvedPackageSids),
     friendlyNameFallbackUsed: facts.friendlyNameFallbackUsed,

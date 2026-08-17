@@ -6,6 +6,7 @@ import type { CrashReportBreadcrumbData } from '../../shared/crash-reporting'
 import { sanitizeCrashReportString } from '../../shared/crash-reporting'
 import { recordCrashBreadcrumb } from '../crash-reporting/crash-breadcrumb-store'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
+import { whenTracerSinkReady } from '../observability/tracer-sink-ready'
 import { readTargetDacl } from './windows-dacl-icacls-reader'
 import {
   rollupFields,
@@ -27,7 +28,9 @@ import { classifyInstallPath } from './windows-install-path-class'
  * S-1-15-2-* ACE to the install tree with neither S-1-15-2-1 nor S-1-15-2-2
  * present. We have no evidence a crashing machine is in that state — this
  * breadcrumb is how we find out, riding along with the next such crash via the
- * retained breadcrumb ring that process-gone-recorder already snapshots.
+ * retained breadcrumb ring that process-gone-recorder already snapshots, plus a
+ * span (deferred until the tracer sink exists) that also records healthy
+ * launches, without which the poison shape has no base rate to compare against.
  */
 
 export { WINDOWS_INSTALL_DIR_ACL_BREADCRUMB }
@@ -68,7 +71,11 @@ export type WindowsInstallDirAclProbeOptions = {
   /** Test seam — defaults to a non-recursive readdir of the install dir. */
   listInstallDirEntries?: (dir: string) => Promise<string[]>
   recordStartBreadcrumb?: (name: string, data: CrashReportBreadcrumbData) => void
+  /** Ring recorder, called as soon as the probe finishes. */
   recordBreadcrumb?: (name: string, data: CrashReportBreadcrumbData) => void
+  /** Span-carrying recorder, deferred until `whenTracerSinkReady` resolves. */
+  recordDurableBreadcrumb?: (name: string, data: CrashReportBreadcrumbData) => void
+  whenTracerSinkReady?: () => Promise<void>
   onDone?: (data: CrashReportBreadcrumbData) => void
 }
 
@@ -157,11 +164,13 @@ async function probeTargets(
   }
 }
 
-async function runProbe(options: WindowsInstallDirAclProbeOptions): Promise<void> {
+async function collectProbeData(
+  options: WindowsInstallDirAclProbeOptions
+): Promise<CrashReportBreadcrumbData> {
   const installDir = options.installDir ?? dirname(process.execPath)
   const deadline = Date.now() + (options.budgetMs ?? PROBE_BUDGET_MS)
   const { outcomes, reason } = await probeTargets(options, installDir, deadline)
-  const data: CrashReportBreadcrumbData = {
+  return {
     ...rollupFields(
       outcomes.map(([, outcome]) => outcome),
       { ...probeContext(options, installDir), reason }
@@ -171,23 +180,63 @@ async function runProbe(options: WindowsInstallDirAclProbeOptions): Promise<void
       {}
     )
   }
-  ;(options.recordBreadcrumb ?? recordDurableCrashBreadcrumb)(
+}
+
+/**
+ * Why two records: the ring must carry the result before a child can die, but
+ * the tracer sink is only installed inside app.whenReady, so emitting durably
+ * here would drop the span half silently — and with it every healthy-launch
+ * report. The retained ring slot is keyed by name, so the later durable record
+ * replaces this one rather than costing a second slot.
+ */
+async function emitProbeResult(
+  options: WindowsInstallDirAclProbeOptions,
+  data: CrashReportBreadcrumbData
+): Promise<void> {
+  ;(options.recordBreadcrumb ?? recordCrashBreadcrumb)(WINDOWS_INSTALL_DIR_ACL_BREADCRUMB, data)
+  options.onDone?.(data)
+  await (options.whenTracerSinkReady ?? whenTracerSinkReady)()
+  ;(options.recordDurableBreadcrumb ?? recordDurableCrashBreadcrumb)(
     WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
     data
   )
-  options.onDone?.(data)
+}
+
+async function runProbe(options: WindowsInstallDirAclProbeOptions): Promise<void> {
+  let data: CrashReportBreadcrumbData
+  try {
+    data = await collectProbeData(options)
+  } catch (error) {
+    // Never throw out of a diagnostic; a failed probe still says something.
+    data = { status: 'failed', reason: sanitizeCrashReportString(`probe: ${String(error)}`, 200) }
+  }
+  await emitProbeResult(options, data)
 }
 
 function probeContext(options: WindowsInstallDirAclProbeOptions, installDir: string): ProbeContext {
   return {
+    ...startMarkerContext(options, installDir),
+    uiLanguage: options.uiLanguage?.() ?? ''
+  }
+}
+
+type StartMarkerContext = Omit<ProbeContext, 'uiLanguage'>
+
+// Why no uiLanguage: the start marker discards it, and resolving it calls into
+// an Electron binding before app.whenReady on the one path that runs
+// synchronously at the caller's module scope.
+function startMarkerContext(
+  options: WindowsInstallDirAclProbeOptions,
+  installDir: string
+): StartMarkerContext {
+  return {
     installPathClass: classifyInstallPath(installDir, options.env ?? process.env),
     windowsBuild: (options.osRelease ?? release)(),
-    uiLanguage: options.uiLanguage?.() ?? '',
     gpuFallbackActive: options.gpuFallbackActive === true
   }
 }
 
-function startMarkerFields(context: ProbeContext): CrashReportBreadcrumbData {
+function startMarkerFields(context: StartMarkerContext): CrashReportBreadcrumbData {
   return {
     status: 'started',
     installPathClass: context.installPathClass,
@@ -216,26 +265,30 @@ export function probeWindowsInstallDirAcl(options: WindowsInstallDirAclProbeOpti
     return
   }
   probeStarted = true
-  // Why: children can die inside the window before icacls returns, and
-  // ProcessGoneDedupe keeps only the first report of a burst. This synchronous
-  // marker occupies the same retained slot the result later replaces, so a
-  // report taken in that window says "probe in flight" rather than nothing —
-  // which is otherwise indistinguishable from an old build or a non-win32 host.
-  ;(options.recordStartBreadcrumb ?? recordCrashBreadcrumb)(
-    WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
-    startMarkerFields(probeContext(options, options.installDir ?? dirname(process.execPath)))
-  )
-  // Why setImmediate: even spawning is deferred past the caller, so nothing on
-  // the startup path pays for this, not even three CreateProcess calls.
-  const deferred = new Promise<void>((resolve) => {
-    setImmediate(() => resolve(runProbe(options)))
-  })
-  void deferred.catch((error: unknown) => {
-    // Never throw out of a diagnostic; a failed probe still says something.
-    ;(options.recordBreadcrumb ?? recordDurableCrashBreadcrumb)(
+  // Why the try: this runs at the caller's module scope, before app.whenReady,
+  // so anything thrown here aborts main-process init and no window is ever
+  // created — a diagnostic must never be able to do that. Schedule first so a
+  // failing start marker still leaves the probe itself running.
+  try {
+    // Why setImmediate: even spawning is deferred past the caller, so nothing on
+    // the startup path pays for this, not even three CreateProcess calls.
+    const deferred = new Promise<void>((resolve) => {
+      setImmediate(() => resolve(runProbe(options)))
+    })
+    void deferred.catch(() => undefined)
+    // Why: children can die inside the window before icacls returns, and
+    // ProcessGoneDedupe keeps only the first report of a burst. This synchronous
+    // marker occupies the same retained slot the result later replaces, so a
+    // report taken in that window says "probe in flight" rather than nothing —
+    // which is otherwise indistinguishable from an old build or a non-win32 host.
+    ;(options.recordStartBreadcrumb ?? recordCrashBreadcrumb)(
       WINDOWS_INSTALL_DIR_ACL_BREADCRUMB,
-      { status: 'failed', reason: sanitizeCrashReportString(`probe: ${String(error)}`, 200) }
+      startMarkerFields(
+        startMarkerContext(options, options.installDir ?? dirname(process.execPath))
+      )
     )
-    options.onDone?.({ reason: 'probe-error' })
-  })
+  } catch {
+    // Swallowed deliberately: the recorder itself is the likeliest thrower here,
+    // so there is nowhere left to report this that would not throw again.
+  }
 }

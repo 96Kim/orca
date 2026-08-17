@@ -49,6 +49,7 @@ import {
   type UploadBundleResult
 } from './diagnostic-bundle-upload'
 import { setActiveSink } from './tracer'
+import { markTracerSinkReady } from './tracer-sink-ready'
 
 const CI_ENV_VARS = [
   'CI',
@@ -147,12 +148,14 @@ function installLocalSink(): void {
 export function initObservability(): ObservabilityConsent {
   const c = resolveObservabilityConsent()
   consent = c
-  if (!c.localFileEnabled) {
-    // Disabled at the CI / ORCA_DIAGNOSTICS_DISABLED level — leave the
-    // tracer's active sink unset, so all spans are no-ops.
-    return c
+  // Disabled at the CI / ORCA_DIAGNOSTICS_DISABLED level leaves the tracer's
+  // active sink unset, so all spans are no-ops.
+  if (c.localFileEnabled) {
+    installLocalSink()
   }
-  installLocalSink()
+  // Why: releases pre-ready diagnostics that deferred their span past the
+  // window where startSpan is a no-op; the disabled path must release too.
+  markTracerSinkReady()
   return c
 }
 
