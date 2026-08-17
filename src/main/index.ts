@@ -190,6 +190,7 @@ import {
   logStartupMilestone
 } from './startup/startup-diagnostics'
 import { ensureWindowsUserDataAclGrant } from './startup/windows-user-data-acl'
+import { probeWindowsInstallDirAcl } from './startup/windows-install-dir-acl-probe'
 import { neutralizeLegacyTerminalShimDir } from './pty/legacy-terminal-shim-dir'
 import { shouldQuitWhenAllWindowsClosed } from './startup/window-all-closed-quit-policy'
 import {
@@ -1346,6 +1347,8 @@ function openMainWindow(options: { revealOnDidFinishLoad?: boolean } = {}): Brow
         }
       }
     })
+    // Why: read-only DACL breadcrumb so the next GPU/renderer STATUS_BREAKPOINT report says whether the install tree carries the orphan package-authority ACE shape we reproduced.
+    probeWindowsInstallDirAcl({ isServeMode, gpuFallbackActive: gpuFallbackActiveThisLaunch })
   }
 
   const window = createMainWindow(store, {
