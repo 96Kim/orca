@@ -1,4 +1,5 @@
 import type {
+  LinearProjectFieldSnapshot,
   LinearProjectRef,
   LinearProjectTargetRequest,
   LinearProjectUpdateHealth,
@@ -66,4 +67,53 @@ export type LinearProjectUpdateAddResult = {
     /** True when a pinned write id matched an existing post with the same intent. */
     deduplicated: boolean
   }
+}
+
+export const LINEAR_PROJECT_EDITABLE_FIELDS = [
+  'name',
+  'description',
+  'content',
+  'status',
+  'lead',
+  'members',
+  'teams',
+  'labels',
+  'priority',
+  'startDate',
+  'targetDate',
+  'color',
+  'icon'
+] as const
+export type LinearProjectEditableField = (typeof LINEAR_PROJECT_EDITABLE_FIELDS)[number]
+
+/**
+ * Only the keys present were requested. `description` clears to `''`; `content`,
+ * `lead`, the dates and `icon` clear to `null`; `members` and `labels` clear to
+ * `[]`. `status` and `color` are non-null on `Project` and have no clear form,
+ * and a team replacement may never be empty.
+ */
+export type LinearProjectEditRequest = LinearProjectTargetRequest & {
+  name?: string
+  description?: string
+  content?: string | null
+  status?: string
+  lead?: string | null
+  members?: string[]
+  teams?: string[]
+  labels?: string[]
+  priority?: number
+  startDate?: string | null
+  targetDate?: string | null
+  color?: string
+  icon?: string | null
+}
+
+export type LinearProjectEditResult = {
+  project: LinearProjectRef
+  /** Only fields whose value actually changed, in LINEAR_PROJECT_EDITABLE_FIELDS order. */
+  changed: LinearProjectEditableField[]
+  previous: Partial<LinearProjectFieldSnapshot>
+  current: Partial<LinearProjectFieldSnapshot>
+  /** `noop` means every requested field already held the requested value; no mutation ran. */
+  meta: { workspaceId: string; noop: boolean }
 }

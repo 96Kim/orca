@@ -482,6 +482,12 @@ function formatCommandFlagHelp(flag: string, commandPath: string[]): string {
       return projectCreateHelp
     }
   }
+  if (command === 'linear project edit') {
+    const projectEditHelp = linearProjectEditFlagHelp(flag)
+    if (projectEditHelp) {
+      return projectEditHelp
+    }
+  }
   if (command === 'linear project update add' && flag === 'id') {
     return '--id <project>        Linear project UUID, slugId, URL, or unique exact name'
   }
@@ -573,6 +579,37 @@ function linearProjectCreateFlagHelp(flag: string): string | undefined {
     color: '--color <#RRGGBB>     Project color; quote it so the shell keeps the #',
     icon: '--icon <icon>         Linear project icon name',
     'write-id': '--write-id <uuid-v4>  UUID v4 pinning the created project id for retries'
+  }
+  return helpByFlag[flag]
+}
+
+// Why: edit reuses the create flag names with replace-not-append semantics, so its
+// help has to restate them rather than inherit the create wording.
+function linearProjectEditFlagHelp(flag: string): string | undefined {
+  const helpByFlag: Record<string, string> = {
+    id: '--id <project>        Linear project UUID, slugId, URL, or unique exact name',
+    name: '--name <title>        Rename the Linear project',
+    description: '--description <text>  Replace the short project summary',
+    'clear-description': '--clear-description   Set the project summary to empty text',
+    content: '--content <text>      Replace the long Markdown project overview',
+    'content-file': '--content-file <path|-> Read the replacement overview from a file or stdin',
+    'clear-content': '--clear-content       Remove the long Markdown project overview',
+    status: '--status <status>     Project status name or id (not an issue workflow state)',
+    lead: '--lead me|<user>      Project lead: me, a user id, email, or exact display name',
+    'clear-lead': '--clear-lead          Leave the project with no lead',
+    member: '--member <user>       Replace ALL members; repeat once per member kept',
+    'clear-members': '--clear-members       Remove every project member',
+    team: '--team <key|id>       Replace ALL teams; repeat once per team kept (never empty)',
+    label: '--label <label>       Replace ALL project labels; repeat once per label kept',
+    'clear-labels': '--clear-labels        Remove every project label',
+    priority: '--priority <level>    none, low, medium, high, or urgent',
+    'start-date': '--start-date <date>   Project start date as YYYY-MM-DD',
+    'clear-start-date': '--clear-start-date    Remove the project start date',
+    'target-date': '--target-date <date>  Project target date as YYYY-MM-DD',
+    'clear-target-date': '--clear-target-date   Remove the project target date',
+    color: '--color <#RRGGBB>     Project color; quote it so the shell keeps the #',
+    icon: '--icon <icon>         Linear project icon name',
+    'clear-icon': '--clear-icon          Remove the project icon'
   }
   return helpByFlag[flag]
 }

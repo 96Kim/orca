@@ -180,7 +180,8 @@ export async function readLinearContent(
   return await readLinearProse(cwd, hasContent ? 'body' : 'body-file', value)
 }
 
-async function readLinearProjectDescription(
+/** `--description` is short prose, so it has no file form; empty text stays meaningful. */
+export async function readLinearProjectDescription(
   flags: Map<string, string | boolean>,
   cwd: string
 ): Promise<string | undefined> {
@@ -221,7 +222,7 @@ function getProjectCreateWriteId(flags: Map<string, string | boolean>): string |
   return writeId
 }
 
-function getProjectColor(flags: Map<string, string | boolean>): string | undefined {
+export function getProjectColor(flags: Map<string, string | boolean>): string | undefined {
   if (!flags.has('color')) {
     return undefined
   }

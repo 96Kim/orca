@@ -5,6 +5,7 @@ import { linearError } from '../../../linear/issue-context-errors'
 import { normalizeLinearLineEndings } from '../../../linear/linear-text-digest'
 import { isLinearUuid, isLinearUuidV4 } from '../../../../shared/linear/uuid'
 import { LINEAR_PROJECT_UPDATE_HEALTH_API_VALUES } from '../../../../shared/linear/project-agent-access'
+import { LINEAR_PROJECT_EDITABLE_FIELDS } from '../../../../shared/linear/project-agent-writes'
 
 const LinearProjectWriteWorkspace = OptionalString.refine((value) => value !== 'all', {
   message: '--workspace all is only valid for project list, statuses, and labels'
@@ -65,6 +66,46 @@ const LinearProjectCreate = z.object({
   workspaceId: LinearProjectWriteWorkspace
 })
 
+// Why: null is the explicit clear for these fields, and OptionalString would erase it to undefined.
+const NullableString = z.union([z.string(), z.null()]).optional()
+
+function nullableCalendarDate(flag: string) {
+  return NullableString.refine((value) => value === null || isOptionalCalendarDate(value), {
+    message: `--${flag} must be a real YYYY-MM-DD date`
+  })
+}
+
+const LinearProjectEdit = z
+  .object({
+    input: LinearProjectTarget,
+    workspaceId: LinearProjectWriteWorkspace,
+    // Why: OptionalPlainString keeps '' so a blank name is rejected instead of read as absent.
+    name: OptionalPlainString.refine((value) => value === undefined || value.trim().length > 0, {
+      message: 'Missing project name'
+    }),
+    description: OptionalPlainString,
+    content: NullableString,
+    status: OptionalString,
+    lead: NullableString,
+    members: z.array(LinearProjectReference).optional(),
+    // Why: members and labels clear with [], but a team replacement must keep at least one team.
+    teams: z.array(LinearProjectReference).min(1, 'At least one team is required').optional(),
+    labels: z.array(LinearProjectReference).optional(),
+    priority: z.number().int().min(0).max(4).optional(),
+    startDate: nullableCalendarDate('start-date'),
+    targetDate: nullableCalendarDate('target-date'),
+    color: OptionalString.refine(
+      (value) => value === undefined || /^#[0-9A-Fa-f]{6}$/.test(value),
+      {
+        message: '--color must be #RRGGBB'
+      }
+    ),
+    icon: NullableString
+  })
+  .refine((params) => LINEAR_PROJECT_EDITABLE_FIELDS.some((field) => params[field] !== undefined), {
+    message: 'At least one field to edit is required'
+  })
+
 function isOptionalCalendarDate(value: string | undefined): boolean {
   if (value === undefined) {
     return true
@@ -113,6 +154,23 @@ export const LINEAR_AGENT_PROJECT_WRITE_METHODS: RpcMethod[] = [
           ? { content: normalizeLinearLineEndings(params.content) }
           : {}),
         writeId: parseLinearProjectCreateWriteId(params.writeId)
+      })
+  }),
+  defineMethod({
+    name: 'linear.agentProjectEdit',
+    params: LinearProjectEdit,
+    handler: async (params, { runtime }) =>
+      // Why: re-normalize here so a direct RPC caller gets the CLI's intent and digest contract.
+      runtime.linearProjectEditForAgents({
+        ...params,
+        input: params.input.trim(),
+        ...(params.name !== undefined ? { name: params.name.trim() } : {}),
+        ...(params.description !== undefined
+          ? { description: normalizeLinearLineEndings(params.description) }
+          : {}),
+        ...(typeof params.content === 'string'
+          ? { content: normalizeLinearLineEndings(params.content) }
+          : {})
       })
   }),
   defineMethod({

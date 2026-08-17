@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { linearProjectWriteUnconfirmed } from './linear-project-write-recovery'
 import type { LinearProjectCreateIntent } from './linear-project-create-intent'
+import type { LinearProjectEditIntent } from './linear-project-edit-intent'
 import type { LinearProjectUpdateAddIntent } from './linear-project-update-write-intent'
 
 const PROJECT_ID = '0f3a1c9e-2b7d-4a51-9c62-8d5f0e7b4a13'
@@ -301,5 +302,128 @@ describe('linearProjectWriteUnconfirmed for project creates', () => {
       descriptionChars: 0,
       descriptionSha256: sha256('')
     })
+  })
+})
+
+function editRecovery(
+  intent: LinearProjectEditIntent,
+  cause?: string
+): Parameters<typeof linearProjectWriteUnconfirmed>[0] {
+  return {
+    kind: 'edit',
+    target: { projectId: PROJECT_ID, workspaceId: WORKSPACE_ID },
+    intent,
+    ...(cause ? { cause } : {})
+  }
+}
+
+describe('linearProjectWriteUnconfirmed for project field edits', () => {
+  it('points at project show instead of a pinned retry, because there is no write id', () => {
+    const error = linearProjectWriteUnconfirmed(
+      editRecovery({ requested: ['name'], edits: { name: 'Aurora Launch' } })
+    )
+
+    const steps = recoveryData(error).nextSteps as string[]
+    expect(error.message).toContain('could not confirm')
+    expect(steps[0]).not.toContain('\n')
+    expect(steps[0]).toContain(
+      `orca linear project show ${PROJECT_ID} --workspace ${WORKSPACE_ID} --json`
+    )
+    expect(steps[0]).toContain('compare the current fields')
+    expect(steps.join(' ')).not.toContain('--write-id')
+    expect(recoveryData(error)).not.toHaveProperty('writeId')
+  })
+
+  it('warns that a collection replacement must not be retried before that read', () => {
+    const error = linearProjectWriteUnconfirmed(
+      editRecovery({
+        requested: ['members', 'labels'],
+        edits: { memberIds: [LEAD_ID], labelIds: [] }
+      })
+    )
+
+    const steps = recoveryData(error).nextSteps as string[]
+    expect(steps.join(' ')).toContain('another actor may have edited it')
+    expect(recoveryData(error)).toMatchObject({
+      requestedFields: ['members', 'labels'],
+      memberIds: [LEAD_ID],
+      labelIds: []
+    })
+  })
+
+  it('records resolved ids plus a character count and digest for every requested text field', () => {
+    const error = linearProjectWriteUnconfirmed(
+      editRecovery(
+        {
+          requested: ['name', 'description', 'content', 'status', 'lead', 'teams', 'icon'],
+          edits: {
+            name: HOSTILE_NAME,
+            description: 'one\ntwo',
+            content: CONTENT,
+            statusId: STATUS_ID,
+            leadId: LEAD_ID,
+            teamIds: [TEAM_ID],
+            icon: 'Rocket'
+          }
+        },
+        'Linear write deadline elapsed before confirmation.'
+      )
+    )
+
+    expect(error).toMatchObject({ code: 'linear_write_unconfirmed' })
+    expect(recoveryData(error)).toMatchObject({
+      projectId: PROJECT_ID,
+      workspaceId: WORKSPACE_ID,
+      statusId: STATUS_ID,
+      leadId: LEAD_ID,
+      teamIds: [TEAM_ID],
+      nameChars: HOSTILE_NAME.length,
+      nameSha256: sha256(HOSTILE_NAME),
+      descriptionChars: 'one\ntwo'.length,
+      descriptionSha256: sha256('one\ntwo'),
+      contentChars: CONTENT.length,
+      contentSha256: sha256(CONTENT),
+      iconChars: 'Rocket'.length,
+      iconSha256: sha256('Rocket'),
+      cause: 'Linear write deadline elapsed before confirmation.'
+    })
+    const steps = (recoveryData(error).nextSteps as string[]).join(' ')
+    expect(steps).not.toContain('rm -rf')
+    expect(steps).not.toContain('Overview')
+    expect(steps).not.toContain('Rocket')
+  })
+
+  it('records cleared text fields as requested with no digest and omits an absent cause', () => {
+    const error = linearProjectWriteUnconfirmed(
+      editRecovery({
+        requested: ['content', 'lead', 'icon'],
+        edits: { content: null, leadId: null, icon: null }
+      })
+    )
+
+    expect(recoveryData(error)).toMatchObject({
+      requestedFields: ['content', 'lead', 'icon'],
+      leadId: null,
+      contentChars: null,
+      contentSha256: null,
+      iconChars: null,
+      iconSha256: null
+    })
+    expect(recoveryData(error)).not.toHaveProperty('cause')
+  })
+
+  it('replaces a hostile project or workspace id with a placeholder', () => {
+    const error = linearProjectWriteUnconfirmed({
+      kind: 'edit',
+      target: { projectId: '`whoami`', workspaceId: 'work space' },
+      intent: { requested: ['priority'], edits: { priority: 0 } }
+    })
+
+    const steps = recoveryData(error).nextSteps as string[]
+    expect(steps[0]).toContain(
+      'orca linear project show PROJECT_ID --workspace WORKSPACE_ID --json'
+    )
+    expect(steps[0]).not.toContain('whoami')
+    expect(recoveryData(error).priority).toBe(0)
   })
 })

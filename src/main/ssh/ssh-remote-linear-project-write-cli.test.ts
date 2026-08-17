@@ -593,6 +593,62 @@ describe('SSH Linear project create argument rejection', () => {
   })
 })
 
+describe('SSH Linear project edit routing beside the other project writes', () => {
+  it('routes edit through the Linear write dispatcher without touching create or update add', async () => {
+    const { dispatch, dispatcher } = createDispatcher()
+
+    await tryDispatchRemoteLinearWriteCli(
+      dispatcher,
+      parseRemoteCliArgs(['linear', 'project', 'edit', 'launch-a1b2', '--clear-lead']),
+      {},
+      undefined
+    )
+
+    expect(dispatch.mock.calls[0][0]).toMatchObject({
+      method: 'linear.agentProjectEdit',
+      params: { input: 'launch-a1b2', lead: null }
+    })
+  })
+
+  it('keeps the create v4 write-id rule and the update add generic write-id rule', async () => {
+    const generic = '3f2504e0-4f89-11d3-9a0c-0305e82c3301'
+
+    await expect(
+      dispatchProjectWrite([
+        'linear',
+        'project',
+        'create',
+        '--name',
+        'Launch',
+        '--team',
+        'ENG',
+        '--write-id',
+        generic
+      ])
+    ).rejects.toMatchObject({ code: 'linear_invalid_write_id' })
+
+    const { dispatch } = await dispatchProjectWrite([
+      'linear',
+      'project',
+      'update',
+      'add',
+      'launch-a1b2',
+      '--body',
+      'Done',
+      '--write-id',
+      generic
+    ])
+    expect(dispatch.mock.calls[0][0].params).toMatchObject({ writeId: generic })
+
+    await expect(
+      dispatchProjectWrite(['linear', 'project', 'edit', 'launch-a1b2', '--write-id', generic])
+    ).rejects.toMatchObject({
+      code: 'invalid_argument',
+      message: 'Unknown flag --write-id for command: linear project edit'
+    })
+  })
+})
+
 describe('SSH Linear project create help', () => {
   it('prints leaf help for the create command', () => {
     const help = getRemoteLinearHelp(parseRemoteCliArgs(['linear', 'project', 'create', '--help']))

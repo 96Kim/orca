@@ -394,6 +394,8 @@ import type {
   LinearProjectListResult,
   LinearProjectCreateRequest,
   LinearProjectCreateResult,
+  LinearProjectEditRequest,
+  LinearProjectEditResult,
   LinearProjectShowRequest,
   LinearProjectShowResult,
   LinearProjectStatusesResult,
@@ -921,6 +923,12 @@ import {
   type LinearProjectCreateIntent
 } from './linear-project-create-intent'
 import { resolveLinearProjectCreateIntent } from './linear-project-create-resolution'
+import { editProjectFieldsForAgent } from '../linear/project-field-edits'
+import {
+  resolveLinearProjectEditIntent,
+  type LinearProjectEditIntent
+} from './linear-project-edit-intent'
+import { buildLinearProjectEditResult } from './linear-project-edit-result'
 import {
   projectUpdateMatchesAddIntent,
   type LinearProjectUpdateAddIntent
@@ -34757,6 +34765,58 @@ export class OrcaRuntimeService {
     return {
       project: created.project,
       meta: { workspaceId, writeId, deduplicated }
+    }
+  }
+
+  async linearProjectEditForAgents(
+    request: LinearProjectEditRequest
+  ): Promise<LinearProjectEditResult> {
+    if (request.workspaceId === 'all') {
+      throw linearError(
+        'linear_invalid_workspace',
+        '--workspace all is only valid for project list, statuses, and labels.'
+      )
+    }
+    this.assertLinearProseWithinCap(request.description)
+    this.assertLinearProseWithinCap(request.content ?? undefined)
+    const project = await this.resolveLinearProjectForWrite(request.input, request.workspaceId)
+    const intent = await this.linearProjectEditIntentForWrite(request, project.workspaceId)
+    // Why: no write id exists for a field edit, so recovery is a read-back, not a pinned retry.
+    const snapshots = await this.runLinearAgentWrite(
+      (signal) =>
+        editProjectFieldsForAgent(project.id, intent.edits, project.workspaceId, { signal }),
+      (cause) =>
+        linearProjectWriteUnconfirmed({
+          kind: 'edit',
+          target: { projectId: project.id, workspaceId: project.workspaceId },
+          intent,
+          ...(cause ? { cause } : {})
+        })
+    )
+    return buildLinearProjectEditResult({
+      project: {
+        id: project.id,
+        name: project.name,
+        slugId: project.slugId,
+        url: project.url
+      },
+      workspaceId: project.workspaceId,
+      requested: intent.requested,
+      edits: intent.edits,
+      previous: snapshots.previous,
+      current: snapshots.current,
+      noop: snapshots.noop
+    })
+  }
+
+  private async linearProjectEditIntentForWrite(
+    request: LinearProjectEditRequest,
+    workspaceId: string
+  ): Promise<LinearProjectEditIntent> {
+    try {
+      return await resolveLinearProjectEditIntent(request, workspaceId)
+    } catch (error) {
+      throw this.mapLinearReadFailure(error)
     }
   }
 

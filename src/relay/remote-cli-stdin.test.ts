@@ -60,6 +60,15 @@ describe('shouldReadRemoteCliStdin', () => {
     ).toBe(false)
   })
 
+  it('reads stdin for a Linear project edit piped over the relay', () => {
+    expect(
+      shouldReadRemoteCliStdin(['linear', 'project', 'edit', 'launch', '--content-file', '-'])
+    ).toBe(true)
+    expect(
+      shouldReadRemoteCliStdin(['linear', 'project', 'edit', 'launch', '--clear-content'])
+    ).toBe(false)
+  })
+
   it('reads stdin for *-stdin payload flags bridged to the full host CLI', () => {
     expect(shouldReadRemoteCliStdin(['computer', 'action', '--app', 'Notes', '--text-stdin'])).toBe(
       true

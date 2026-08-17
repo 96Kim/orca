@@ -5,6 +5,7 @@ import {
 } from '../linear/issue-context-errors'
 import { linearSha256Hex, normalizeLinearLineEndings } from '../linear/linear-text-digest'
 import type { LinearProjectCreateIntent } from './linear-project-create-intent'
+import type { LinearProjectEditIntent } from './linear-project-edit-intent'
 import type { LinearProjectUpdateAddIntent } from './linear-project-update-write-intent'
 
 // Why: excludes space, quote, backtick, $, ; and | so no interpolated id can break out of the retry command.
@@ -22,10 +23,7 @@ export type LinearProjectWriteRecoveryTarget = {
   workspaceId: string
 }
 
-/**
- * PR4 (`project edit`, which has no write id and points at `orca linear project
- * show` instead) adds its own member to this union.
- */
+/** `edit` carries no write id: `ProjectUpdateInput` has none, so no retry can be pinned. */
 export type LinearProjectWriteRecovery =
   | {
       kind: 'update-add'
@@ -40,6 +38,12 @@ export type LinearProjectWriteRecovery =
       intent: LinearProjectCreateIntent
       cause?: string
     }
+  | {
+      kind: 'edit'
+      target: LinearProjectWriteRecoveryTarget
+      intent: LinearProjectEditIntent
+      cause?: string
+    }
 
 /** Builds the `linear_write_unconfirmed` error for a project write Orca could not confirm. */
 export function linearProjectWriteUnconfirmed(
@@ -50,7 +54,54 @@ export function linearProjectWriteUnconfirmed(
       return updatePostUnconfirmed(recovery)
     case 'create':
       return createUnconfirmed(recovery)
+    case 'edit':
+      return editUnconfirmed(recovery)
   }
+}
+
+/**
+ * A field edit has no write id, so recovery is a read: `project show` is the only
+ * safe way to learn what the project holds now before anything is retried.
+ */
+function editUnconfirmed(
+  recovery: Extract<LinearProjectWriteRecovery, { kind: 'edit' }>
+): LinearAgentAccessError {
+  const { target, intent } = recovery
+  const show = [
+    'orca linear project show',
+    commandToken(target.projectId, 'PROJECT_ID'),
+    '--workspace',
+    commandToken(target.workspaceId, 'WORKSPACE_ID'),
+    '--json'
+  ].join(' ')
+  const { edits } = intent
+  return linearError(
+    'linear_write_unconfirmed',
+    'Linear may have applied the project edit, but Orca could not confirm it.',
+    {
+      projectId: target.projectId,
+      workspaceId: target.workspaceId,
+      requestedFields: intent.requested,
+      statusId: edits.statusId ?? null,
+      leadId: edits.leadId ?? null,
+      memberIds: edits.memberIds ?? null,
+      teamIds: edits.teamIds ?? null,
+      labelIds: edits.labelIds ?? null,
+      priority: edits.priority ?? null,
+      startDate: edits.startDate ?? null,
+      targetDate: edits.targetDate ?? null,
+      color: edits.color ?? null,
+      ...textDigestFields('name', edits.name),
+      ...textDigestFields('description', edits.description),
+      ...textDigestFields('content', edits.content ?? undefined),
+      ...textDigestFields('icon', edits.icon ?? undefined),
+      nextSteps: [
+        `Run \`${show}\` and compare the current fields against the requested counts and digests before retrying.`,
+        'Do not retry a member, team, or label replacement until that read confirms the full current collection; another actor may have edited it.'
+      ],
+      ...(recovery.cause ? { cause: sanitizeLinearErrorMessage(recovery.cause) } : {})
+    }
+  )
 }
 
 function updatePostUnconfirmed(

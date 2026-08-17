@@ -8,6 +8,10 @@ import {
 } from '../../shared/linear/project-agent-writes'
 import type { LinearProjectUpdateHealth } from '../../shared/linear/project-agent-access'
 import {
+  LINEAR_PROJECT_EDIT_COMMAND,
+  buildRemoteLinearProjectEditRequest
+} from './ssh-remote-linear-project-edit-request'
+import {
   RemoteLinearWriteArgumentError,
   calendarDateFlag,
   call,
@@ -79,6 +83,13 @@ export async function tryDispatchRemoteLinearProjectWriteCli(
       dispatcher,
       'linear.agentProjectCreate',
       buildRemoteLinearProjectCreateRequest(parsed, stdin)
+    )
+  }
+  if (isRemoteCommand(parsed, ...LINEAR_PROJECT_EDIT_COMMAND)) {
+    return await call(
+      dispatcher,
+      'linear.agentProjectEdit',
+      buildRemoteLinearProjectEditRequest(parsed, stdin)
     )
   }
   return null
