@@ -202,13 +202,31 @@ async function emitProbeResult(
   )
 }
 
+// Why: the failure record replaces the start marker's retained slot, so dropping
+// its context would make the worst-case report weaker than the one it overwrites.
+function startMarkerFieldsOrEmpty(
+  options: WindowsInstallDirAclProbeOptions
+): CrashReportBreadcrumbData {
+  try {
+    return startMarkerFields(
+      startMarkerContext(options, options.installDir ?? dirname(process.execPath))
+    )
+  } catch {
+    return {}
+  }
+}
+
 async function runProbe(options: WindowsInstallDirAclProbeOptions): Promise<void> {
   let data: CrashReportBreadcrumbData
   try {
     data = await collectProbeData(options)
   } catch (error) {
     // Never throw out of a diagnostic; a failed probe still says something.
-    data = { status: 'failed', reason: sanitizeCrashReportString(`probe: ${String(error)}`, 200) }
+    data = {
+      ...startMarkerFieldsOrEmpty(options),
+      status: 'failed',
+      reason: sanitizeCrashReportString(`probe: ${String(error)}`, 200)
+    }
   }
   await emitProbeResult(options, data)
 }

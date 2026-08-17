@@ -421,6 +421,23 @@ describe('probeWindowsInstallDirAcl', () => {
     expect(data.probedTargetCount).toBe(1)
   })
 
+  it('keeps the start marker context when the probe itself throws', async () => {
+    const { data } = await runProbe({
+      spawnFn: createFakeSpawn((target) => ({ stdout: CLEAN(target) })).spawnFn,
+      gpuFallbackActive: true,
+      uiLanguage: () => {
+        throw new Error('pre-ready binding')
+      }
+    })
+    expect(data.status).toBe('failed')
+    expect(String(data.reason)).toContain('pre-ready binding')
+    // The failure record replaces the retained start marker, so it must not lose
+    // the context that marker already carried.
+    expect(data.installPathClass).toBe('localappdata-programs')
+    expect(data.windowsBuild).toBe('10.0.26200')
+    expect(data.gpuFallbackActiveThisLaunch).toBe(true)
+  })
+
   it('records an in-flight marker synchronously, before the first spawn', () => {
     const fake = createFakeSpawn((target) => ({ stdout: CLEAN(target) }))
     const started: { name: string; data: CrashReportBreadcrumbData }[] = []
