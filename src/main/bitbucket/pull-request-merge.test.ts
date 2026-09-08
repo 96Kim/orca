@@ -64,10 +64,28 @@ describe('mergeBitbucketPullRequest', () => {
         method: 'POST',
         body: JSON.stringify({
           merge_strategy: 'merge_commit',
-          close_source_branch: true
+          close_source_branch: false
         })
       }),
       60_000
+    )
+  })
+
+  it('allows closing source branch when explicitly requested', async () => {
+    vi.mocked(requestHostedReviewJson).mockResolvedValue({})
+
+    const result = await mergeBitbucketPullRequest('/repo/path', 42, 'merge_commit', true)
+
+    expect(result).toEqual({ ok: true })
+    expect(requestHostedReviewJson).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        body: JSON.stringify({
+          merge_strategy: 'merge_commit',
+          close_source_branch: true
+        })
+      }),
+      expect.anything()
     )
   })
 
@@ -117,6 +135,23 @@ describe('mergeBitbucketPullRequest', () => {
       error:
         'Merge failed: Bitbucket is not connected. Connect Bitbucket in Settings > Integrations.'
     })
+  })
+
+  it('rejects non-HTTPS Bitbucket API baseUrl for merge', async () => {
+    vi.mocked(resolveBitbucketAuthConfig).mockReturnValue({
+      baseUrl: 'http://insecure-bitbucket.org/2.0',
+      accessToken: 'test-token',
+      email: null,
+      apiToken: null
+    })
+
+    const result = await mergeBitbucketPullRequest('/repo/path', 42)
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'Merge failed: Bitbucket API URL must use HTTPS.'
+    })
+    expect(requestHostedReviewJson).not.toHaveBeenCalled()
   })
 
   it('invalidates branch cache on successful merge', async () => {
@@ -188,5 +223,22 @@ describe('declineBitbucketPullRequest', () => {
       expect.objectContaining({ method: 'POST' }),
       60_000
     )
+  })
+
+  it('rejects non-HTTPS Bitbucket API baseUrl for decline', async () => {
+    vi.mocked(resolveBitbucketAuthConfig).mockReturnValue({
+      baseUrl: 'http://insecure-bitbucket.org/2.0',
+      accessToken: 'test-token',
+      email: null,
+      apiToken: null
+    })
+
+    const result = await declineBitbucketPullRequest('/repo/path', 10)
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'Close failed: Bitbucket API URL must use HTTPS.'
+    })
+    expect(requestHostedReviewJson).not.toHaveBeenCalled()
   })
 })

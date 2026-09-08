@@ -34,20 +34,6 @@ export function presentBitbucketPRMergeState(
     }
   }
 
-  if (review.mergeable === 'CONFLICTING') {
-    return {
-      label: translate(
-        'auto.components.right.sidebar.bitbucket.pr.merge.state.conflicts',
-        'Merge blocked'
-      ),
-      tooltip: translate(
-        'auto.components.right.sidebar.bitbucket.pr.merge.state.conflictsTooltip',
-        'Bitbucket reports merge conflicts that must be resolved before merging'
-      ),
-      directMergeAvailable: false
-    }
-  }
-
   return {
     label: translate(
       'auto.components.right.sidebar.bitbucket.pr.merge.state.merge',

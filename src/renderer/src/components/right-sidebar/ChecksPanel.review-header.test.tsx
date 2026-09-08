@@ -154,6 +154,6 @@ describe('ChecksPanelReviewHeader', () => {
     expect(markup).toContain(
       'Orca will hide PR #12 details for this workspace. The PR and branch on Bitbucket won’t be changed.'
     )
-    expect(markup).toContain('Link another PR')
+    expect(markup).not.toContain('Link another PR')
   })
 })

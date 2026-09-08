@@ -12,17 +12,6 @@ describe('presentBitbucketPRMergeState', () => {
     expect(state.label).toBe('Merge pull request')
   })
 
-  it('blocks merge for conflicting review', () => {
-    const state = presentBitbucketPRMergeState({
-      state: 'open',
-      status: 'success',
-      mergeable: 'CONFLICTING'
-    })
-    expect(state.directMergeAvailable).toBe(false)
-    expect(state.label).toBe('Merge blocked')
-    expect(state.tooltip).toContain('merge conflicts')
-  })
-
   it('handles closed review', () => {
     const state = presentBitbucketPRMergeState({
       state: 'closed',

@@ -8,6 +8,7 @@ import {
   type BitbucketConnectResult,
   type BitbucketConnectionStatus
 } from '../bitbucket/credential-connection'
+import type { BitbucketPRMergeMethod } from '../../shared/bitbucket-merge-methods'
 import { _resetPreflightCache } from './preflight'
 
 function optionalString(value: unknown): string | null {
@@ -65,7 +66,7 @@ export function registerBitbucketHandlers(): void {
       args: {
         repoPath: string
         prNumber: number
-        method?: 'merge_commit' | 'squash' | 'fast_forward'
+        method?: BitbucketPRMergeMethod
         closeSourceBranch?: boolean
         executionHostId?: ExecutionHostId
       }

@@ -159,7 +159,13 @@ export function ChecksPanelActiveContent({
         ) : null}
 
         {/* Review title */}
-        {editingTitle ? (
+        {activeReview.provider === 'bitbucket' ? (
+          <div className="flex items-start gap-1.5 -mx-1 px-1 py-0.5">
+            <span className="text-[12px] text-foreground leading-snug flex-1">
+              {activeReview.title}
+            </span>
+          </div>
+        ) : editingTitle ? (
           <div className="flex items-center gap-1">
             <input
               ref={titleInputRef}

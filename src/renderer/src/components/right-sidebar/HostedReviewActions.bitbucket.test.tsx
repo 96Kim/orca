@@ -54,26 +54,6 @@ describe('HostedReviewActions Bitbucket integration', () => {
     expect(html).toContain('Close')
   })
 
-  it('renders merge blocked when Bitbucket PR has conflicts', () => {
-    const html = renderToStaticMarkup(
-      <HostedReviewActions
-        review={{
-          provider: 'bitbucket',
-          number: 42,
-          state: 'open',
-          status: 'failure',
-          mergeable: 'CONFLICTING'
-        }}
-        repo={repo}
-        worktree={worktree}
-        onRefreshReview={vi.fn().mockResolvedValue(undefined)}
-      />
-    )
-
-    expect(html).toContain('Merge blocked')
-    expect(html).toContain('merge conflicts')
-  })
-
   it('renders delete workspace button for closed/declined Bitbucket PR', () => {
     const html = renderToStaticMarkup(
       <HostedReviewActions

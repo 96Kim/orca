@@ -57,17 +57,7 @@ export function useHostedReviewActions({
   defaultMergeMethod: HostedReviewMergeMethod
   autoMergeAction: GitHubPRAutoMergeAction | null
   onRefreshReview: () => Promise<void>
-}): {
-  merging: boolean
-  readying: boolean
-  stateUpdating: 'open' | 'closed' | null
-  actionError: string | null
-  handleMerge: (method?: HostedReviewMergeMethod) => Promise<void>
-  handleAutoMerge: () => Promise<void>
-  handleMarkReadyForReview: () => Promise<void>
-  handleCloseReview: () => Promise<void>
-  handleReopenReview: () => Promise<void>
-} {
+}) {
   const confirm = useConfirmationDialog()
   const [merging, setMerging] = useState(false)
   const [stateUpdating, setStateUpdating] = useState<'open' | 'closed' | null>(null)
@@ -235,7 +225,10 @@ export function useHostedReviewActions({
                 })
               : {
                   ok: false,
-                  error: 'Reopening declined Bitbucket pull requests is not supported.'
+                  error: translate(
+                    'auto.components.right.sidebar.bitbucket.pr.reopenUnsupported',
+                    'Reopening declined Bitbucket pull requests is not supported.'
+                  )
                 }
             : await updateGitHubHostedReviewState({
                 repo,

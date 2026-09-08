@@ -273,7 +273,7 @@ export function useChecksPanelEntryRefreshAndTitleActions(
   ])
 
   const handleStartEdit = useCallback(() => {
-    if (!activeReview) {
+    if (!activeReview || activeReview.provider === 'bitbucket') {
       return
     }
     setTitleDraft(activeReview.title)

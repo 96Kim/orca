@@ -132,6 +132,9 @@ export function useChecksPanelReviewLinkActions(
       openLinkPullRequestModal(activeWorktree.linkedPR ?? activeReview.number)
       return
     }
+    if (activeReview.provider === 'bitbucket') {
+      return
+    }
     const openedScopeKey = reviewLinkScopeKey
     openModal('edit-meta', {
       worktreeId: activeWorktreeId,

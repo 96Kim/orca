@@ -99,7 +99,7 @@ export async function mergeBitbucketPullRequest(
   repoPath: string,
   prNumber: number,
   method: BitbucketPRMergeMethod = 'merge_commit',
-  closeSourceBranch = true,
+  closeSourceBranch = false,
   executionHostId: ExecutionHostId = 'local',
   options: HostedReviewExecutionOptions = {}
 ): Promise<BitbucketMergeResult> {
@@ -129,6 +129,12 @@ export async function mergeBitbucketPullRequest(
   const url = new URL(
     `${config.baseUrl.replace(/\/+$/, '')}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/merge`
   )
+  if (url.protocol !== 'https:') {
+    return {
+      ok: false,
+      error: 'Merge failed: Bitbucket API URL must use HTTPS.'
+    }
+  }
 
   const body = {
     merge_strategy: method,
@@ -188,6 +194,12 @@ export async function declineBitbucketPullRequest(
   const url = new URL(
     `${config.baseUrl.replace(/\/+$/, '')}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/decline`
   )
+  if (url.protocol !== 'https:') {
+    return {
+      ok: false,
+      error: 'Close failed: Bitbucket API URL must use HTTPS.'
+    }
+  }
 
   try {
     await requestHostedReviewJson(
