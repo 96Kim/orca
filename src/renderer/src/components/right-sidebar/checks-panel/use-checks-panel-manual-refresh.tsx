@@ -2,12 +2,7 @@ import { useCallback } from 'react'
 import { useAppStore } from '@/store'
 import { buildGitHubPRRefreshStateClearToken } from '@/store/github/pr-refresh-state'
 import { refreshHostedReviewCard } from '@/store/slices/hosted-review-card-refresh'
-import { getRuntimeGitStatus, getRuntimeGitUpstreamStatus } from '@/runtime/runtime-git-client'
-import {
-  hasChecksPanelGitStatusBranchChanged,
-  readChecksPanelRefreshGitIdentitySnapshot,
-  shouldCommitChecksPanelGitStatusSnapshot
-} from '../checks-panel-git-status-snapshot'
+import { syncChecksPanelPreRefreshGitIdentity } from './checks-panel-pre-refresh-git-identity'
 
 import { checksPanelAsyncResultKey } from '../checks-panel-async-result-key'
 import { recordChecksPanelPRRefreshBreadcrumb } from '../checks-panel-pr-refresh-breadcrumb'
@@ -26,6 +21,7 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
     branch,
     expireGitHubPRRefreshState,
     fallbackGitHubPRNumber,
+    fetchBitbucketDetails,
     fetchGitLabDetails,
     fetchHostedReviewForBranch,
     fetchPRChecks,
@@ -103,71 +99,23 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
     recordBreadcrumb('start')
     try {
       if (activeWorktreeId && activeWorktreePath && !isFolder) {
-        const snapshotIdentity = readChecksPanelRefreshGitIdentitySnapshot({
-          snapshot: gitStatusSnapshot,
-          contextKey: panelContextKey,
-          currentBranch: branch
+        const syncResult = await syncChecksPanelPreRefreshGitIdentity({
+          activeConnectionId,
+          activeWorktreeId,
+          activeWorktreePath,
+          activeWorktreePushTarget,
+          branch,
+          gitStatusSnapshot,
+          isCurrentRequest,
+          ownerSettings,
+          panelContextKey,
+          panelContextKeyRef,
+          setGitStatusSnapshot,
+          updateWorktreeGitIdentity
         })
-        if (snapshotIdentity.kind === 'changed') {
-          updateWorktreeGitIdentity(activeWorktreeId, {
-            head: snapshotIdentity.head,
-            branch: snapshotIdentity.branch
-          })
-          // Why: this click discovered a terminal branch switch; let branch-keyed render/effects restart instead of refreshing old PR data.
+        if (syncResult === 'branch-changed') {
           refreshOutcome = 'branch-changed'
           return
-        }
-        try {
-          const statusContext = {
-            settings: ownerSettings,
-            worktreeId: activeWorktreeId,
-            worktreePath: activeWorktreePath,
-            connectionId: activeConnectionId ?? undefined
-          }
-          const status = await getRuntimeGitStatus(statusContext, {
-            admissionTier: 'interactive'
-          })
-          const observedBranch = status.branch ?? (status.head ? null : undefined)
-          updateWorktreeGitIdentity(activeWorktreeId, {
-            head: status.head,
-            branch: observedBranch
-          })
-          if (
-            observedBranch !== undefined &&
-            hasChecksPanelGitStatusBranchChanged({ observedBranch, currentBranch: branch })
-          ) {
-            // Why: this click discovered a terminal branch switch; let branch-keyed render/effects restart instead of refreshing old PR data.
-            refreshOutcome = 'branch-changed'
-            return
-          }
-          let freshRemoteStatus = status.upstreamStatus
-          if (activeWorktreePushTarget) {
-            freshRemoteStatus = await getRuntimeGitUpstreamStatus(
-              statusContext,
-              activeWorktreePushTarget
-            )
-          } else if (
-            !freshRemoteStatus ||
-            (freshRemoteStatus.ahead > 0 &&
-              freshRemoteStatus.behind > 0 &&
-              freshRemoteStatus.behindCommitsArePatchEquivalent === undefined)
-          ) {
-            freshRemoteStatus = await getRuntimeGitUpstreamStatus(statusContext)
-          }
-          if (
-            isCurrentRequest() &&
-            shouldCommitChecksPanelGitStatusSnapshot(panelContextKeyRef.current, panelContextKey)
-          ) {
-            // Why: the Refresh click already paid for this status read; commit it so empty-state Publish/Create eligibility is fresh.
-            setGitStatusSnapshot({
-              contextKey: panelContextKey,
-              hasUncommittedChanges: status.entries.length > 0,
-              remoteStatus: freshRemoteStatus,
-              gitIdentity: { head: status.head, branch: observedBranch }
-            })
-          }
-        } catch (error) {
-          console.warn('[ChecksPanel] pre-refresh git identity refresh failed', error)
         }
       }
       const hostedReviewArgs = {
@@ -210,8 +158,21 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
           }
         } else {
           setChecks([])
-          setComments([])
-          refreshOutcome = refreshedReview?.provider === 'bitbucket' ? 'review' : 'no-review'
+          const refreshedBitbucketReview =
+            refreshedReview?.provider === 'bitbucket'
+              ? refreshedReview
+              : activeReview?.provider === 'bitbucket'
+                ? activeReview
+                : null
+          if (refreshedBitbucketReview) {
+            await fetchBitbucketDetails({
+              prNumberOverride: refreshedBitbucketReview.number
+            })
+            refreshOutcome = 'review'
+          } else {
+            setComments([])
+            refreshOutcome = 'no-review'
+          }
         }
         return
       }
@@ -351,7 +312,7 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
     activeWorktreePath,
     activeWorktreePushTarget,
     activeGitLabReview,
-    activeReview?.provider,
+    activeReview,
     prNumber,
     pr?.checksStatus,
     pr?.headSha,
@@ -360,6 +321,7 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
     prCacheKey,
     linkedPR,
     fallbackGitHubPRNumber,
+    fetchBitbucketDetails,
     fetchGitLabDetails,
     linkedAzureDevOpsPR,
     linkedBitbucketPR,

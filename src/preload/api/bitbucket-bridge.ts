@@ -17,5 +17,11 @@ export const bitbucketApi = {
 
   mergePR: (args) => ipcRenderer.invoke('bitbucket:mergePR', args),
 
-  closePR: (args) => ipcRenderer.invoke('bitbucket:closePR', args)
+  closePR: (args) => ipcRenderer.invoke('bitbucket:closePR', args),
+
+  getPRComments: (args) => ipcRenderer.invoke('bitbucket:getPRComments', args),
+
+  addPRComment: (args) => ipcRenderer.invoke('bitbucket:addPRComment', args),
+
+  replyPRComment: (args) => ipcRenderer.invoke('bitbucket:replyPRComment', args)
 } satisfies PreloadApi['bitbucket']

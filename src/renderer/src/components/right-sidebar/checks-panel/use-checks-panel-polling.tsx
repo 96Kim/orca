@@ -12,7 +12,7 @@ import { fetchGitLabMRDetailsForChecks, gitLabMRCommentsToPRComments } from './g
 
 type ChecksPanelPollingInput = Pick<
   ChecksPanelContextState,
-  'activeGitLabReview' | 'hostedReviewCacheKey' | 'pr' | 'prCacheKey' | 'prNumber'
+  'activeGitLabReview' | 'activeReview' | 'hostedReviewCacheKey' | 'pr' | 'prCacheKey' | 'prNumber'
 > &
   Pick<
     ChecksPanelControllerState,
@@ -37,6 +37,7 @@ export function useChecksPanelPolling(model: ChecksPanelPollingInput) {
   const {
     activeWorktree,
     activeGitLabReview,
+    activeReview,
     asyncResultKeyRef,
     branch,
     fetchPRChecks,
@@ -270,7 +271,52 @@ export function useChecksPanelPolling(model: ChecksPanelPollingInput) {
       getDelayMs: () => pollIntervalRef.current
     })
   }, [activeGitLabReview, fetchGitLabDetails, isPanelVisible, pollIntervalRef, prevChecksRef])
-  return { fetchChecks, fetchGitLabDetails }
+
+  const fetchBitbucketDetails = useCallback(
+    async ({
+      prNumberOverride
+    }: {
+      prNumberOverride?: number | null
+    } = {}) => {
+      const targetPRNumber = prNumberOverride ?? activeReview?.number ?? null
+      if (!repo || !targetPRNumber || activeReview?.provider !== 'bitbucket') {
+        return
+      }
+      try {
+        const result = await window.api.bitbucket.getPRComments({
+          repoPath: repo.path,
+          prNumber: targetPRNumber,
+          executionHostId: activeWorktree?.hostId
+        })
+        setComments(result)
+      } catch (err) {
+        console.warn('Failed to poll Bitbucket comments:', err)
+      }
+    },
+    [activeReview?.number, activeReview?.provider, activeWorktree?.hostId, repo, setComments]
+  )
+
+  useEffect(() => {
+    if (
+      activeReview?.provider !== 'bitbucket' ||
+      activeReview.state !== 'open' ||
+      !isPanelVisible
+    ) {
+      return
+    }
+    return installWindowVisibilityTimeoutPoller({
+      run: () => fetchBitbucketDetails(),
+      getDelayMs: () => 30_000
+    })
+  }, [
+    activeReview?.number,
+    activeReview?.provider,
+    activeReview?.state,
+    fetchBitbucketDetails,
+    isPanelVisible
+  ])
+
+  return { fetchChecks, fetchGitLabDetails, fetchBitbucketDetails }
 }
 
 export type ChecksPanelPollingState = ReturnType<typeof useChecksPanelPolling>

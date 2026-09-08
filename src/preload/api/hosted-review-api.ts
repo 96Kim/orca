@@ -24,6 +24,8 @@ export type HostedReviewApi = {
   createStacked: (args: CreateStackedHostedReviewArgs) => Promise<CreateStackedHostedReviewResult>
 }
 
+import type { PRComment } from '../../shared/github/comment-types'
+
 export type BitbucketApi = {
   connect: (
     args: BitbucketConnectArgs
@@ -42,4 +44,24 @@ export type BitbucketApi = {
     prNumber: number
     executionHostId?: ExecutionHostId
   }) => Promise<{ ok: true } | { ok: false; error: string }>
+  getPRComments: (args: {
+    repoPath: string
+    prNumber: number
+    executionHostId?: ExecutionHostId
+  }) => Promise<PRComment[]>
+  addPRComment: (args: {
+    repoPath: string
+    prNumber: number
+    body: string
+    parentId?: number
+    inline?: { path: string; line: number }
+    executionHostId?: ExecutionHostId
+  }) => Promise<{ ok: true; comment: PRComment } | { ok: false; error: string }>
+  replyPRComment: (args: {
+    repoPath: string
+    prNumber: number
+    parentId: number
+    body: string
+    executionHostId?: ExecutionHostId
+  }) => Promise<{ ok: true; comment: PRComment } | { ok: false; error: string }>
 }

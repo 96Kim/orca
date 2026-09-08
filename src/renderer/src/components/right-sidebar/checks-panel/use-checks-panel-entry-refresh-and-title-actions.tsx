@@ -115,6 +115,9 @@ export function useChecksPanelEntryRefreshAndTitleActions(
         if (activeGitLabReview) {
           void fetchGitLabDetails()
         }
+        if (activeReview?.provider === 'bitbucket') {
+          void fetchComments({ force: true })
+        }
         return
       }
       enqueueGitHubPRRefresh(activeWorktreeId, 'active', 80)
@@ -127,6 +130,7 @@ export function useChecksPanelEntryRefreshAndTitleActions(
     },
     [
       activeGitLabReview,
+      activeReview?.provider,
       activeWorktree?.head,
       activeWorktreeId,
       branch,

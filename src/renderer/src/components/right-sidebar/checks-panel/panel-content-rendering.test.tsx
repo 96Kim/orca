@@ -4,6 +4,8 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChecksPanelActiveContentModel } from './active-content-props'
 import type { ChecksPanelEmptyContentModel } from './empty-content-props'
+import type { PRComment } from '../../../../../shared/github/comment-types'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { ChecksPanelReviewHeader } from '../ChecksPanel'
 
 vi.mock('../HostedReviewActions', () => ({ default: () => null }))
@@ -175,7 +177,9 @@ describe('checks panel concrete content', () => {
     } satisfies ChecksPanelActiveContentModel
 
     render(
-      <ChecksPanelActiveContent model={model} ReviewHeaderComponent={ChecksPanelReviewHeader} />
+      <TooltipProvider>
+        <ChecksPanelActiveContent model={model} ReviewHeaderComponent={ChecksPanelReviewHeader} />
+      </TooltipProvider>
     )
 
     expect(screen.getByText('Preserve mounted panel behavior')).toBeTruthy()
@@ -187,8 +191,10 @@ describe('checks panel concrete content', () => {
     )
   })
 
-  it('omits checks and comments sections for Bitbucket reviews', () => {
-    const model = {
+  function createBitbucketActiveContentModel(
+    overrides: Partial<ChecksPanelActiveContentModel> = {}
+  ): ChecksPanelActiveContentModel {
+    return {
       activeConnectionId: null,
       activeConflictReview: null,
       activeGitLabReview: null,
@@ -262,15 +268,49 @@ describe('checks panel concrete content', () => {
       titleDraft: '',
       setTitleDraft: vi.fn(),
       titleInputRef: { current: null },
-      titleSaving: false
-    } satisfies ChecksPanelActiveContentModel
+      titleSaving: false,
+      ...overrides
+    }
+  }
+
+  it('omits checks section while rendering comments section for Bitbucket reviews', () => {
+    const model = createBitbucketActiveContentModel()
 
     render(
-      <ChecksPanelActiveContent model={model} ReviewHeaderComponent={ChecksPanelReviewHeader} />
+      <TooltipProvider>
+        <ChecksPanelActiveContent model={model} ReviewHeaderComponent={ChecksPanelReviewHeader} />
+      </TooltipProvider>
     )
 
     expect(screen.getByText('Bitbucket PR review')).toBeTruthy()
     expect(screen.queryByText('No checks configured')).toBeNull()
-    expect(screen.queryByText('No comments')).toBeNull()
+    expect(screen.getByText('Comments')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Start conversation' })).toBeTruthy()
+  })
+
+  it('renders comments for Bitbucket reviews', () => {
+    const bitbucketComment: PRComment = {
+      id: 1,
+      author: 'Aiden',
+      authorAvatarUrl: '',
+      body: 'Bitbucket comment body',
+      createdAt: '2026-08-23T00:00:00.000Z',
+      url: 'https://bitbucket.org/ws/repo/pull-requests/42#comment-1',
+      isResolved: false,
+      threadId: 'bb-comment-1'
+    }
+
+    const model = createBitbucketActiveContentModel({
+      canTargetPRComments: true,
+      comments: [bitbucketComment]
+    })
+
+    render(
+      <TooltipProvider>
+        <ChecksPanelActiveContent model={model} ReviewHeaderComponent={ChecksPanelReviewHeader} />
+      </TooltipProvider>
+    )
+
+    expect(screen.getByText('Bitbucket comment body')).toBeTruthy()
   })
 })

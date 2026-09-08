@@ -264,28 +264,26 @@ export function ChecksPanelActiveContent({
             getGitLabProjectRef={getGitLabProjectRef}
           />
         )}
-      {activeReview.provider !== 'bitbucket' && (
-        <PRCommentsList
-          comments={comments}
-          commentsLoading={commentsLoading}
-          reviewKind={reviewShortLabel}
-          commentsDisabled={!canTargetPRComments}
-          commentsDisabledReason={commentsDisabledReason}
-          selectionContextKey={stateRequestKey}
-          selectionClearRequest={commentsSelectionClearRequest}
-          resolveCommentsWithAIDisabled={Boolean(resolveCommentsWithAIDisabledReason)}
-          resolveCommentsWithAIDisabledReason={resolveCommentsWithAIDisabledReason}
-          onAddComment={pr ? handleAddPRComment : undefined}
-          onResolveSelectedCommentsWithAI={
-            sourceControlAiActionsVisible ? handleResolveCommentsWithAI : undefined
-          }
-          onReply={pr ? handleReplyToComment : undefined}
-          onResolve={pr || activeGitLabReview ? handleResolve : undefined}
-          onEditComment={pr ? handleEditComment : undefined}
-          onDeleteComment={pr ? handleDeleteComment : undefined}
-          onSetReaction={canTargetPRComments ? handleSetReaction : undefined}
-        />
-      )}
+      <PRCommentsList
+        comments={comments}
+        commentsLoading={commentsLoading}
+        reviewKind={reviewShortLabel}
+        commentsDisabled={!canTargetPRComments}
+        commentsDisabledReason={commentsDisabledReason}
+        selectionContextKey={stateRequestKey}
+        selectionClearRequest={commentsSelectionClearRequest}
+        resolveCommentsWithAIDisabled={Boolean(resolveCommentsWithAIDisabledReason)}
+        resolveCommentsWithAIDisabledReason={resolveCommentsWithAIDisabledReason}
+        onAddComment={pr || activeReview.provider === 'bitbucket' ? handleAddPRComment : undefined}
+        onResolveSelectedCommentsWithAI={
+          sourceControlAiActionsVisible ? handleResolveCommentsWithAI : undefined
+        }
+        onReply={pr || activeReview.provider === 'bitbucket' ? handleReplyToComment : undefined}
+        onResolve={pr || activeGitLabReview ? handleResolve : undefined}
+        onEditComment={pr ? handleEditComment : undefined}
+        onDeleteComment={pr ? handleDeleteComment : undefined}
+        onSetReaction={canTargetPRComments ? handleSetReaction : undefined}
+      />
       <SourceControlAgentActionDialog
         open={sourceControlAiActionsVisible && agentComposerState !== null}
         onOpenChange={(open) => {

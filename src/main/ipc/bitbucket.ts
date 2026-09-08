@@ -92,4 +92,82 @@ export function registerBitbucketHandlers(): void {
       return declineBitbucketPullRequest(args.repoPath, args.prNumber, args.executionHostId)
     }
   )
+
+  ipcMain.handle(
+    'bitbucket:getPRComments',
+    async (
+      _event,
+      args: { repoPath: string; prNumber: number; executionHostId?: ExecutionHostId }
+    ) => {
+      const { fetchBitbucketPRComments } = await import('../bitbucket/comments')
+      const { hostedReviewSshConnectionId } =
+        await import('../source-control/hosted-review-execution-host')
+      const connectionId = hostedReviewSshConnectionId(args.executionHostId ?? 'local')
+      return fetchBitbucketPRComments(args.repoPath, args.prNumber, connectionId)
+    }
+  )
+
+  ipcMain.handle(
+    'bitbucket:addPRComment',
+    async (
+      _event,
+      args: {
+        repoPath: string
+        prNumber: number
+        body: string
+        parentId?: number
+        inline?: { path: string; line: number }
+        executionHostId?: ExecutionHostId
+      }
+    ) => {
+      const { hostedReviewSshConnectionId } =
+        await import('../source-control/hosted-review-execution-host')
+      const connectionId = hostedReviewSshConnectionId(args.executionHostId ?? 'local')
+      if (typeof args.parentId === 'number') {
+        const { replyBitbucketPRComment } = await import('../bitbucket/comments')
+        return replyBitbucketPRComment(
+          args.repoPath,
+          args.prNumber,
+          args.parentId,
+          args.body,
+          connectionId
+        )
+      }
+      const { addBitbucketPRComment } = await import('../bitbucket/comments')
+      return addBitbucketPRComment(
+        args.repoPath,
+        args.prNumber,
+        args.body,
+        connectionId,
+        {},
+        args.inline
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'bitbucket:replyPRComment',
+    async (
+      _event,
+      args: {
+        repoPath: string
+        prNumber: number
+        parentId: number
+        body: string
+        executionHostId?: ExecutionHostId
+      }
+    ) => {
+      const { replyBitbucketPRComment } = await import('../bitbucket/comments')
+      const { hostedReviewSshConnectionId } =
+        await import('../source-control/hosted-review-execution-host')
+      const connectionId = hostedReviewSshConnectionId(args.executionHostId ?? 'local')
+      return replyBitbucketPRComment(
+        args.repoPath,
+        args.prNumber,
+        args.parentId,
+        args.body,
+        connectionId
+      )
+    }
+  )
 }

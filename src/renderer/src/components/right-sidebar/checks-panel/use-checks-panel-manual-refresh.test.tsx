@@ -52,6 +52,7 @@ describe('useChecksPanelManualRefresh ordering', () => {
       branch: 'main',
       expireGitHubPRRefreshState: vi.fn(),
       fallbackGitHubPRNumber: null,
+      fetchBitbucketDetails: vi.fn(),
       fetchGitLabDetails: vi.fn(),
       fetchHostedReviewForBranch: vi.fn(),
       fetchPRChecks: vi.fn(async () => {
