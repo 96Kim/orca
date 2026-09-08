@@ -15,6 +15,7 @@ export function useChecksPanelReviewLinkActions(
     activeWorktreeId,
     branch,
     fetchHostedReviewForBranch,
+    linkedBitbucketPR,
     linkedGitLabMR,
     linkedPR,
     localExecutionScope,
@@ -60,6 +61,17 @@ export function useChecksPanelReviewLinkActions(
       void unlinkGitHubPullRequest()
       return
     }
+    if (activeReview.provider === 'bitbucket') {
+      if (linkedBitbucketPR === null) {
+        return
+      }
+      void updateWorktreeMeta(
+        activeWorktreeId,
+        { linkedBitbucketPR: null },
+        { executionHostId: activeWorktree.hostId }
+      )
+      return
+    }
     if (linkedGitLabMR === null) {
       return
     }
@@ -72,6 +84,7 @@ export function useChecksPanelReviewLinkActions(
     activeReview,
     activeWorktree,
     activeWorktreeId,
+    linkedBitbucketPR,
     linkedGitLabMR,
     unlinkGitHubPullRequest,
     updateWorktreeMeta

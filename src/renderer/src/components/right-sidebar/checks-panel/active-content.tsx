@@ -87,6 +87,7 @@ export function ChecksPanelActiveContent({
     isRefreshing,
     isResolvingConflictsWithAI,
     linkedGitLabMR,
+    linkedBitbucketPR,
     pendingCommentResolutionRef,
     pr,
     prRefreshState,
@@ -131,7 +132,15 @@ export function ChecksPanelActiveContent({
         <ReviewHeaderComponent
           review={activeReview}
           isRefreshing={isRefreshing}
-          canUnlinkReview={activeReview.provider === 'github' ? true : linkedGitLabMR !== null}
+          canUnlinkReview={
+            activeReview.provider === 'github'
+              ? true
+              : activeReview.provider === 'gitlab'
+                ? linkedGitLabMR !== null
+                : activeReview.provider === 'bitbucket'
+                  ? linkedBitbucketPR !== null
+                  : false
+          }
           modifierHintDestination={hostedReviewModifierHintDestination}
           onRefresh={() => void handleRefresh()}
           onOpenReview={handleOpenPR}
@@ -238,36 +247,39 @@ export function ChecksPanelActiveContent({
         </>
       )}
       {/* Why: with merge conflicts and no checks fetched, "No checks configured" is misleading — checks can't run until conflicts resolve. */}
-      {!(activeConflictReview && checks.length === 0 && !checksLoading) && (
-        <ChecksList
-          checks={checks}
-          checksLoading={checksLoading}
-          checkDetailsContextKey={stateRequestKey}
-          onLoadCheckDetails={handleLoadCheckDetails}
-          githubRepository={pr?.prRepo ?? null}
-          getGitLabProjectRef={getGitLabProjectRef}
+      {!(activeConflictReview && checks.length === 0 && !checksLoading) &&
+        (activeReview.provider !== 'bitbucket' || checks.length > 0) && (
+          <ChecksList
+            checks={checks}
+            checksLoading={checksLoading}
+            checkDetailsContextKey={stateRequestKey}
+            onLoadCheckDetails={handleLoadCheckDetails}
+            githubRepository={pr?.prRepo ?? null}
+            getGitLabProjectRef={getGitLabProjectRef}
+          />
+        )}
+      {activeReview.provider !== 'bitbucket' && (
+        <PRCommentsList
+          comments={comments}
+          commentsLoading={commentsLoading}
+          reviewKind={reviewShortLabel}
+          commentsDisabled={!canTargetPRComments}
+          commentsDisabledReason={commentsDisabledReason}
+          selectionContextKey={stateRequestKey}
+          selectionClearRequest={commentsSelectionClearRequest}
+          resolveCommentsWithAIDisabled={Boolean(resolveCommentsWithAIDisabledReason)}
+          resolveCommentsWithAIDisabledReason={resolveCommentsWithAIDisabledReason}
+          onAddComment={pr ? handleAddPRComment : undefined}
+          onResolveSelectedCommentsWithAI={
+            sourceControlAiActionsVisible ? handleResolveCommentsWithAI : undefined
+          }
+          onReply={pr ? handleReplyToComment : undefined}
+          onResolve={pr || activeGitLabReview ? handleResolve : undefined}
+          onEditComment={pr ? handleEditComment : undefined}
+          onDeleteComment={pr ? handleDeleteComment : undefined}
+          onSetReaction={canTargetPRComments ? handleSetReaction : undefined}
         />
       )}
-      <PRCommentsList
-        comments={comments}
-        commentsLoading={commentsLoading}
-        reviewKind={reviewShortLabel}
-        commentsDisabled={!canTargetPRComments}
-        commentsDisabledReason={commentsDisabledReason}
-        selectionContextKey={stateRequestKey}
-        selectionClearRequest={commentsSelectionClearRequest}
-        resolveCommentsWithAIDisabled={Boolean(resolveCommentsWithAIDisabledReason)}
-        resolveCommentsWithAIDisabledReason={resolveCommentsWithAIDisabledReason}
-        onAddComment={pr ? handleAddPRComment : undefined}
-        onResolveSelectedCommentsWithAI={
-          sourceControlAiActionsVisible ? handleResolveCommentsWithAI : undefined
-        }
-        onReply={pr ? handleReplyToComment : undefined}
-        onResolve={pr || activeGitLabReview ? handleResolve : undefined}
-        onEditComment={pr ? handleEditComment : undefined}
-        onDeleteComment={pr ? handleDeleteComment : undefined}
-        onSetReaction={canTargetPRComments ? handleSetReaction : undefined}
-      />
       <SourceControlAgentActionDialog
         open={sourceControlAiActionsVisible && agentComposerState !== null}
         onOpenChange={(open) => {

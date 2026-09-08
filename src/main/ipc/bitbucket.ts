@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import type { ExecutionHostId } from '../../shared/execution-host'
 import {
   connectBitbucket,
   disconnectBitbucket,
@@ -56,4 +57,38 @@ export function registerBitbucketHandlers(): void {
   ipcMain.handle('bitbucket:status', async (): Promise<BitbucketConnectionStatus> => {
     return getBitbucketConnectionStatus()
   })
+
+  ipcMain.handle(
+    'bitbucket:mergePR',
+    async (
+      _event,
+      args: {
+        repoPath: string
+        prNumber: number
+        method?: 'merge_commit' | 'squash' | 'fast_forward'
+        closeSourceBranch?: boolean
+        executionHostId?: ExecutionHostId
+      }
+    ) => {
+      const { mergeBitbucketPullRequest } = await import('../bitbucket/pull-request-merge')
+      return mergeBitbucketPullRequest(
+        args.repoPath,
+        args.prNumber,
+        args.method,
+        args.closeSourceBranch,
+        args.executionHostId
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'bitbucket:closePR',
+    async (
+      _event,
+      args: { repoPath: string; prNumber: number; executionHostId?: ExecutionHostId }
+    ) => {
+      const { declineBitbucketPullRequest } = await import('../bitbucket/pull-request-merge')
+      return declineBitbucketPullRequest(args.repoPath, args.prNumber, args.executionHostId)
+    }
+  )
 }
