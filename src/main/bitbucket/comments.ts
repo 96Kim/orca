@@ -17,6 +17,13 @@ import {
 
 export { apiErrorMessage, mapBitbucketComment, mapBitbucketComments, type RawBitbucketComment }
 
+export class BitbucketInsecureUrlError extends Error {
+  constructor(message = 'Bitbucket API URL must use HTTPS.') {
+    super(message)
+    this.name = 'BitbucketInsecureUrlError'
+  }
+}
+
 function encodedRepoPath(repo: BitbucketRepoRef): string {
   return `${encodeURIComponent(repo.workspace)}/${encodeURIComponent(repo.repoSlug)}`
 }
@@ -42,15 +49,22 @@ export async function fetchBitbucketPRComments(
   }
 
   const base = config.baseUrl.replace(/\/+$/, '')
-  const initialUrl = new URL(
-    `${base}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/comments`
-  )
+  let initialUrl: URL
+  try {
+    initialUrl = new URL(
+      `${base}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/comments`
+    )
+  } catch {
+    return []
+  }
   initialUrl.searchParams.set('pagelen', '100')
+  initialUrl.searchParams.set('fields', '+values.resolution')
 
   if (initialUrl.protocol !== 'https:') {
-    throw new Error('Bitbucket API URL must use HTTPS.')
+    throw new BitbucketInsecureUrlError()
   }
 
+  const allowedOrigin = new URL(base).origin
   const rawComments: RawBitbucketComment[] = []
   let nextUrl: string | null = initialUrl.toString()
   let pageCount = 0
@@ -61,7 +75,11 @@ export async function fetchBitbucketPRComments(
       pageCount++
       const targetUrl = new URL(nextUrl)
       if (targetUrl.protocol !== 'https:') {
-        throw new Error('Bitbucket API URL must use HTTPS.')
+        throw new BitbucketInsecureUrlError()
+      }
+      if (targetUrl.origin !== allowedOrigin) {
+        console.warn('Ignoring Bitbucket pagination URL with unexpected origin')
+        break
       }
       const pageData = await requestHostedReviewJson<{
         values?: RawBitbucketComment[]
@@ -70,6 +88,7 @@ export async function fetchBitbucketPRComments(
         targetUrl,
         {
           method: 'GET',
+          redirect: 'error',
           headers: {
             Accept: 'application/json',
             ...authHeaders(config)
@@ -84,7 +103,7 @@ export async function fetchBitbucketPRComments(
     }
     return mapBitbucketComments(rawComments)
   } catch (err) {
-    if (err instanceof Error && err.message.includes('HTTPS')) {
+    if (err instanceof BitbucketInsecureUrlError) {
       throw err
     }
     console.warn('Failed to fetch Bitbucket PR comments:', err)
@@ -122,9 +141,15 @@ export async function addBitbucketPRComment(
   }
 
   const base = config.baseUrl.replace(/\/+$/, '')
-  const url = new URL(
-    `${base}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/comments`
-  )
+  let url: URL
+  try {
+    url = new URL(`${base}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/comments`)
+  } catch {
+    return {
+      ok: false,
+      error: 'Bitbucket API URL must use HTTPS.'
+    }
+  }
   if (url.protocol !== 'https:') {
     return {
       ok: false,
@@ -177,7 +202,8 @@ export async function replyBitbucketPRComment(
   parentCommentId: number,
   body: string,
   connectionId?: string | null,
-  options: HostedReviewExecutionOptions = {}
+  options: HostedReviewExecutionOptions = {},
+  rootCommentId?: number
 ): Promise<{ ok: true; comment: PRComment } | { ok: false; error: string }> {
   const config = resolveBitbucketAuthConfig()
   if (!hasAuth(config)) {
@@ -201,9 +227,15 @@ export async function replyBitbucketPRComment(
   }
 
   const base = config.baseUrl.replace(/\/+$/, '')
-  const url = new URL(
-    `${base}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/comments`
-  )
+  let url: URL
+  try {
+    url = new URL(`${base}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/comments`)
+  } catch {
+    return {
+      ok: false,
+      error: 'Bitbucket API URL must use HTTPS.'
+    }
+  }
   if (url.protocol !== 'https:') {
     return {
       ok: false,
@@ -234,7 +266,7 @@ export async function replyBitbucketPRComment(
     )
     return {
       ok: true,
-      comment: mapBitbucketComment(created, parentCommentId)
+      comment: mapBitbucketComment(created, rootCommentId ?? parentCommentId)
     }
   } catch (error) {
     const message = apiErrorMessage(error)

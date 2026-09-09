@@ -4,6 +4,7 @@ import { resolveBitbucketAuthConfig } from './resolve-auth'
 import { getBitbucketRepoRef } from './repository-ref'
 import {
   addBitbucketPRComment,
+  BitbucketInsecureUrlError,
   fetchBitbucketPRComments,
   mapBitbucketComment,
   mapBitbucketComments,
@@ -13,12 +14,12 @@ import {
 
 vi.mock('../source-control/hosted-review-api-request', () => ({
   HostedReviewApiRequestError: class HostedReviewApiRequestError extends Error {
-    constructor(
-      message: string,
-      readonly status: number | null = null,
-      readonly timedOut = false
-    ) {
+    readonly status: number | null
+    readonly timedOut: boolean
+    constructor(message: string, options: { status?: number | null; timedOut?: boolean } = {}) {
       super(message)
+      this.status = options.status ?? null
+      this.timedOut = options.timedOut ?? false
     }
   },
   requestHostedReviewJson: vi.fn()
@@ -217,6 +218,39 @@ describe('Bitbucket comments', () => {
       expect(comments[0].id).toBe(1)
       expect(comments[1].threadId).toBe('1')
     })
+
+    it('maps isResolved: true and propagates resolution state to thread replies', () => {
+      const rawComments: RawBitbucketComment[] = [
+        {
+          id: 10,
+          content: { raw: 'Resolved thread root' },
+          inline: { path: 'src/file.ts', to: 15 },
+          resolution: { type: 'resolved', created_on: '2026-03-26T12:00:00Z' }
+        },
+        {
+          id: 11,
+          content: { raw: 'Reply in resolved thread' },
+          parent: { id: 10 }
+        },
+        {
+          id: 20,
+          content: { raw: 'Open thread root' },
+          inline: { path: 'src/file.ts', to: 30 }
+        },
+        {
+          id: 21,
+          content: { raw: 'Reply in open thread' },
+          parent: { id: 20 }
+        }
+      ]
+
+      const comments = mapBitbucketComments(rawComments)
+      expect(comments).toHaveLength(4)
+      expect(comments[0].isResolved).toBe(true)
+      expect(comments[1].isResolved).toBe(true)
+      expect(comments[2].isResolved).toBe(false)
+      expect(comments[3].isResolved).toBe(false)
+    })
   })
 
   describe('fetchBitbucketPRComments', () => {
@@ -259,10 +293,11 @@ describe('Bitbucket comments', () => {
       expect(comments[0].body).toBe('LGTM')
       expect(requestHostedReviewJson).toHaveBeenCalledWith(
         new URL(
-          'https://api.bitbucket.org/2.0/repositories/my-workspace/my-repo/pullrequests/42/comments?pagelen=100'
+          'https://api.bitbucket.org/2.0/repositories/my-workspace/my-repo/pullrequests/42/comments?pagelen=100&fields=%2Bvalues.resolution'
         ),
         expect.objectContaining({
           method: 'GET',
+          redirect: 'error',
           headers: expect.objectContaining({
             Authorization: 'Bearer test-token'
           })
@@ -297,7 +332,24 @@ describe('Bitbucket comments', () => {
       })
 
       await expect(fetchBitbucketPRComments('/repo/path', 42)).rejects.toThrow(
-        'Bitbucket API URL must use HTTPS.'
+        BitbucketInsecureUrlError
+      )
+    })
+
+    it('stops pagination when nextUrl points to an unexpected origin', async () => {
+      vi.mocked(requestHostedReviewJson).mockResolvedValueOnce({
+        values: [{ id: 1, content: { raw: 'Page 1' } }],
+        next: 'https://evil.com/2.0/repositories/my-workspace/my-repo/pullrequests/42/comments?page=2'
+      })
+
+      const comments = await fetchBitbucketPRComments('/repo/path', 42)
+      expect(comments).toHaveLength(1)
+      expect(comments[0].id).toBe(1)
+      expect(requestHostedReviewJson).toHaveBeenCalledTimes(1)
+      expect(requestHostedReviewJson).toHaveBeenCalledWith(
+        expect.any(URL),
+        expect.objectContaining({ redirect: 'error' }),
+        30_000
       )
     })
 
@@ -416,6 +468,34 @@ describe('Bitbucket comments', () => {
       expect(result).toEqual({
         ok: false,
         error: 'Failed to reply to comment: Failed to reach Bitbucket'
+      })
+    })
+
+    it('uses rootCommentId for threadId when provided', async () => {
+      vi.mocked(requestHostedReviewJson).mockResolvedValueOnce({
+        id: 52,
+        content: { raw: 'Reply to reply' },
+        parent: { id: 51 },
+        user: { nickname: 'me' }
+      })
+
+      const result = await replyBitbucketPRComment(
+        '/repo/path',
+        42,
+        51,
+        'Reply to reply',
+        null,
+        {},
+        50
+      )
+
+      expect(result).toEqual({
+        ok: true,
+        comment: expect.objectContaining({
+          id: 52,
+          body: 'Reply to reply',
+          threadId: '50'
+        })
       })
     })
   })

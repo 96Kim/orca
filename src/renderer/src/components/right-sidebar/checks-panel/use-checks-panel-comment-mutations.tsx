@@ -58,9 +58,10 @@ export function useChecksPanelCommentMutations(model: ChecksPanelCommentMutation
         if (!repo || !activeReview.number) {
           return { ok: false as const, error: commentsDisabledReason ?? 'Commenting unavailable.' }
         }
+        const targetPrNumber = activeReview.number
         const result = await window.api.bitbucket.addPRComment({
           repoPath: repo.path,
-          prNumber: activeReview.number,
+          prNumber: targetPrNumber,
           body,
           executionHostId: activeWorktree?.hostId
         })
@@ -68,7 +69,9 @@ export function useChecksPanelCommentMutations(model: ChecksPanelCommentMutation
           toast.error(result.error)
           return result
         }
-        setComments((prev) => mergePRCommentIntoList(prev, result.comment))
+        if (activeReview?.provider === 'bitbucket' && activeReview.number === targetPrNumber) {
+          setComments((prev) => mergePRCommentIntoList(prev, result.comment))
+        }
         return { ok: true as const }
       }
       if (!repo || !prNumber || !pr?.prRepo) {
@@ -227,13 +230,18 @@ export function useChecksPanelCommentMutations(model: ChecksPanelCommentMutation
         if (!repo || !activeReview.number) {
           return { ok: false as const, error: commentsDisabledReason ?? 'Commenting unavailable.' }
         }
+        const targetPrNumber = activeReview.number
         const parentId = comment.id
+        const threadId = comment.threadId ?? String(parentId)
+        const rootCommentId = Number(threadId)
         const result = await window.api.bitbucket.replyPRComment({
           repoPath: repo.path,
-          prNumber: activeReview.number,
+          prNumber: targetPrNumber,
           parentId,
           body,
-          executionHostId: activeWorktree?.hostId
+          executionHostId: activeWorktree?.hostId,
+          rootCommentId:
+            Number.isInteger(rootCommentId) && rootCommentId > 0 ? rootCommentId : undefined
         })
         if (!result.ok) {
           if (notifyOnFailure) {
@@ -241,14 +249,15 @@ export function useChecksPanelCommentMutations(model: ChecksPanelCommentMutation
           }
           return result
         }
-        const threadId = comment.threadId ?? String(parentId)
-        const commentWithThread: PRComment = {
-          ...result.comment,
-          threadId,
-          path: result.comment.path ?? comment.path,
-          line: result.comment.line ?? comment.line
+        if (activeReview?.provider === 'bitbucket' && activeReview.number === targetPrNumber) {
+          const commentWithThread: PRComment = {
+            ...result.comment,
+            threadId,
+            path: result.comment.path ?? comment.path,
+            line: result.comment.line ?? comment.line
+          }
+          setComments((prev) => mergePRCommentIntoList(prev, commentWithThread))
         }
-        setComments((prev) => mergePRCommentIntoList(prev, commentWithThread))
         return { ok: true as const }
       }
       if (!repo || !prNumber || !pr?.prRepo) {

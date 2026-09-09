@@ -32,6 +32,11 @@ export type RawBitbucketComment = {
   links?: {
     html?: { href?: string }
   }
+  resolution?: {
+    type?: string
+    created_on?: string
+    user?: Record<string, unknown>
+  } | null
 }
 
 export function apiErrorMessage(error: unknown): string {
@@ -74,7 +79,7 @@ export function findRootCommentId(id: number, parentMap: Map<number, number>): n
 export function mapBitbucketComment(
   raw: RawBitbucketComment,
   threadRootId?: number,
-  inheritedInline?: { path?: string; line?: number }
+  inheritedInline?: { path?: string; line?: number; isResolved?: boolean }
 ): PRComment {
   const author = raw.user?.nickname?.trim() || raw.user?.display_name?.trim() || 'unknown'
   const authorAvatarUrl = raw.user?.links?.avatar?.href || ''
@@ -92,7 +97,8 @@ export function mapBitbucketComment(
 
   const rootId = threadRootId ?? (raw.parent?.id ? raw.parent.id : raw.id)
   const threadId = String(rootId)
-  const isResolved = path ? false : undefined
+  const isResolved =
+    raw.resolution != null || inheritedInline?.isResolved ? true : path ? false : undefined
 
   return {
     id: raw.id,
@@ -139,13 +145,17 @@ export function mapBitbucketComments(rawComments: readonly RawBitbucketComment[]
     }
     const rootId = findRootCommentId(raw.id, parentMap)
     const root = rootComments.get(rootId)
+    const isRootResolved = Boolean(root?.resolution != null)
     const inheritedInline =
       root?.inline?.path && !raw.inline?.path
         ? {
             path: root.inline.path,
-            line: root.inline.to ?? root.inline.from ?? undefined
+            line: root.inline.to ?? root.inline.from ?? undefined,
+            isResolved: isRootResolved
           }
-        : undefined
+        : isRootResolved
+          ? { isResolved: true }
+          : undefined
 
     result.push(mapBitbucketComment(raw, rootId, inheritedInline))
   }

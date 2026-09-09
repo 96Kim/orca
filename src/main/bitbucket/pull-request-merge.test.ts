@@ -10,12 +10,12 @@ import { invalidateHostedReviewBranchCache } from '../source-control/hosted-revi
 
 vi.mock('../source-control/hosted-review-api-request', () => ({
   HostedReviewApiRequestError: class HostedReviewApiRequestError extends Error {
-    constructor(
-      message: string,
-      readonly status: number | null = null,
-      readonly timedOut = false
-    ) {
+    readonly status: number | null
+    readonly timedOut: boolean
+    constructor(message: string, options: { status?: number | null; timedOut?: boolean } = {}) {
       super(message)
+      this.status = options.status ?? null
+      this.timedOut = options.timedOut ?? false
     }
   },
   requestHostedReviewJson: vi.fn()

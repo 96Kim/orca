@@ -54,6 +54,7 @@ export type BitbucketApi = {
     prNumber: number
     body: string
     parentId?: number
+    rootCommentId?: number
     inline?: { path: string; line: number }
     executionHostId?: ExecutionHostId
   }) => Promise<{ ok: true; comment: PRComment } | { ok: false; error: string }>
@@ -62,6 +63,7 @@ export type BitbucketApi = {
     prNumber: number
     parentId: number
     body: string
+    rootCommentId?: number
     executionHostId?: ExecutionHostId
   }) => Promise<{ ok: true; comment: PRComment } | { ok: false; error: string }>
 }

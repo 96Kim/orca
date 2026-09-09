@@ -69,12 +69,18 @@ export function useChecksPanelReviewData(model: ChecksPanelReviewDataInput) {
             prNumber: targetPRNumber,
             executionHostId: activeWorktree?.hostId
           })
-          setComments(result)
+          if (activeReview?.provider === 'bitbucket' && activeReview.number === targetPRNumber) {
+            setComments(result)
+          }
         } catch (err) {
           console.warn('Failed to fetch Bitbucket PR comments:', err)
-          setComments([])
+          if (activeReview?.provider === 'bitbucket' && activeReview.number === targetPRNumber) {
+            setComments([])
+          }
         } finally {
-          setCommentsLoading(false)
+          if (activeReview?.provider === 'bitbucket' && activeReview.number === targetPRNumber) {
+            setCommentsLoading(false)
+          }
         }
         return
       }

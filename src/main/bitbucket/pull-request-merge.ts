@@ -126,9 +126,17 @@ export async function mergeBitbucketPullRequest(
     }
   }
 
-  const url = new URL(
-    `${config.baseUrl.replace(/\/+$/, '')}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/merge`
-  )
+  let url: URL
+  try {
+    url = new URL(
+      `${config.baseUrl.replace(/\/+$/, '')}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/merge`
+    )
+  } catch {
+    return {
+      ok: false,
+      error: 'Merge failed: Bitbucket API URL must use HTTPS.'
+    }
+  }
   if (url.protocol !== 'https:') {
     return {
       ok: false,
@@ -191,9 +199,17 @@ export async function declineBitbucketPullRequest(
     }
   }
 
-  const url = new URL(
-    `${config.baseUrl.replace(/\/+$/, '')}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/decline`
-  )
+  let url: URL
+  try {
+    url = new URL(
+      `${config.baseUrl.replace(/\/+$/, '')}/repositories/${encodedRepoPath(repo)}/pullrequests/${prNumber}/decline`
+    )
+  } catch {
+    return {
+      ok: false,
+      error: 'Close failed: Bitbucket API URL must use HTTPS.'
+    }
+  }
   if (url.protocol !== 'https:') {
     return {
       ok: false,

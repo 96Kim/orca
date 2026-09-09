@@ -76,7 +76,14 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
     refreshRequestKeyRef.current = refreshRequestKey
     const isCurrentRequest = (): boolean => refreshRequestKeyRef.current === refreshRequestKey
     const refreshStartedAt = Date.now()
-    const refreshProvider = isGitLabReviewContext ? 'gitlab' : 'github'
+    const isBitbucketReviewContext = Boolean(
+      activeReview?.provider === 'bitbucket' || linkedBitbucketPR !== null
+    )
+    const refreshProvider = isGitLabReviewContext
+      ? 'gitlab'
+      : isBitbucketReviewContext
+        ? 'bitbucket'
+        : 'github'
     let refreshOutcome = 'started'
     setIsRefreshing(true)
     const recordBreadcrumb = (event: 'start' | 'done', outcome?: string): void => {
@@ -87,9 +94,16 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
         worktreeId: activeWorktreeId,
         branch,
         prCacheKey,
-        prNumber: activeGitLabReview?.number ?? prNumber,
-        prState: activeGitLabReview?.state ?? pr?.state,
-        prChecksStatus: pr?.checksStatus,
+        prNumber:
+          activeGitLabReview?.number ??
+          (activeReview?.provider === 'bitbucket' ? activeReview.number : undefined) ??
+          linkedBitbucketPR ??
+          prNumber,
+        prState:
+          activeGitLabReview?.state ??
+          (activeReview?.provider === 'bitbucket' ? activeReview.state : undefined) ??
+          pr?.state,
+        prChecksStatus: isBitbucketReviewContext ? null : pr?.checksStatus,
         refreshState: prCacheKey ? useAppStore.getState().prRefreshStates[prCacheKey] : null,
         outcome,
         durationMs: event === 'done' ? Date.now() - refreshStartedAt : undefined,
@@ -130,9 +144,6 @@ export function useChecksPanelManualRefresh(model: ChecksPanelManualRefreshInput
         linkedAzureDevOpsPR,
         linkedGiteaPR
       }
-      const isBitbucketReviewContext = Boolean(
-        activeReview?.provider === 'bitbucket' || linkedBitbucketPR !== null
-      )
       if (isGitLabReviewContext || isBitbucketReviewContext) {
         const refreshedReview = await refreshHostedReviewCard(
           fetchHostedReviewForBranch,

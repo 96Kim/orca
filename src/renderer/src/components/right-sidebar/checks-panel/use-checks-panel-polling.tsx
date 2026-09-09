@@ -58,6 +58,7 @@ export function useChecksPanelPolling(model: ChecksPanelPollingInput) {
     gitLabProjectRefRef
   } = model
   const gitLabDetailsLoadingGenerationRef = useRef(0)
+  const bitbucketDetailsLoadingGenerationRef = useRef(0)
   // Fetch checks via cached store method
   const fetchChecks = useCallback(
     async ({
@@ -282,13 +283,20 @@ export function useChecksPanelPolling(model: ChecksPanelPollingInput) {
       if (!repo || !targetPRNumber || activeReview?.provider !== 'bitbucket') {
         return
       }
+      const loadingGeneration = ++bitbucketDetailsLoadingGenerationRef.current
       try {
         const result = await window.api.bitbucket.getPRComments({
           repoPath: repo.path,
           prNumber: targetPRNumber,
           executionHostId: activeWorktree?.hostId
         })
-        setComments(result)
+        if (
+          bitbucketDetailsLoadingGenerationRef.current === loadingGeneration &&
+          activeReview?.provider === 'bitbucket' &&
+          activeReview.number === targetPRNumber
+        ) {
+          setComments(result)
+        }
       } catch (err) {
         console.warn('Failed to poll Bitbucket comments:', err)
       }
