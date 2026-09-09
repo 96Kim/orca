@@ -7,6 +7,7 @@ import { resolveBitbucketAuthConfig } from './resolve-auth'
 import { getBitbucketRepoRef } from './repository-ref'
 import { declineBitbucketPullRequest, mergeBitbucketPullRequest } from './pull-request-merge'
 import { invalidateHostedReviewBranchCache } from '../source-control/hosted-review-branch-cache'
+import type { ExecutionHostId } from '../../shared/execution-host'
 
 vi.mock('../source-control/hosted-review-api-request', () => ({
   HostedReviewApiRequestError: class HostedReviewApiRequestError extends Error {
@@ -186,6 +187,22 @@ describe('mergeBitbucketPullRequest', () => {
       error: 'Merge failed: Branch permission prevented merge: Needs 2 approvals'
     })
   })
+
+  it('returns structured error when host cannot be dispatched', async () => {
+    const result = await mergeBitbucketPullRequest(
+      '/repo/path',
+      42,
+      'merge_commit',
+      false,
+      'runtime:remote-env' as ExecutionHostId
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('Merge failed:')
+    }
+    expect(requestHostedReviewJson).not.toHaveBeenCalled()
+  })
 })
 
 describe('declineBitbucketPullRequest', () => {
@@ -239,6 +256,20 @@ describe('declineBitbucketPullRequest', () => {
       ok: false,
       error: 'Close failed: Bitbucket API URL must use HTTPS.'
     })
+    expect(requestHostedReviewJson).not.toHaveBeenCalled()
+  })
+
+  it('returns structured error when host cannot be dispatched', async () => {
+    const result = await declineBitbucketPullRequest(
+      '/repo/path',
+      10,
+      'runtime:remote-env' as ExecutionHostId
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('Close failed:')
+    }
     expect(requestHostedReviewJson).not.toHaveBeenCalled()
   })
 })

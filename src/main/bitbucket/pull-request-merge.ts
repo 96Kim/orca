@@ -103,7 +103,15 @@ export async function mergeBitbucketPullRequest(
   executionHostId: ExecutionHostId = 'local',
   options: HostedReviewExecutionOptions = {}
 ): Promise<BitbucketMergeResult> {
-  const connectionId = hostedReviewSshConnectionId(executionHostId)
+  let connectionId: string | null
+  try {
+    connectionId = hostedReviewSshConnectionId(executionHostId)
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Merge failed: ${error instanceof Error ? error.message : 'Invalid execution host.'}`
+    }
+  }
   const config = resolveBitbucketAuthConfig()
 
   if (!hasAuth(config)) {
@@ -176,7 +184,15 @@ export async function declineBitbucketPullRequest(
   executionHostId: ExecutionHostId = 'local',
   options: HostedReviewExecutionOptions = {}
 ): Promise<BitbucketMergeResult> {
-  const connectionId = hostedReviewSshConnectionId(executionHostId)
+  let connectionId: string | null
+  try {
+    connectionId = hostedReviewSshConnectionId(executionHostId)
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Close failed: ${error instanceof Error ? error.message : 'Invalid execution host.'}`
+    }
+  }
   const config = resolveBitbucketAuthConfig()
 
   if (!hasAuth(config)) {

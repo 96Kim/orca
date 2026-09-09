@@ -55,6 +55,28 @@ function normalizeConnectInput(value: unknown): BitbucketConnectArgs | null {
   }
 }
 
+async function resolveBitbucketConnectionId(
+  rawExecutionHostId: unknown
+): Promise<{ ok: true; connectionId: string | null } | { ok: false; error: string }> {
+  if (
+    rawExecutionHostId !== undefined &&
+    rawExecutionHostId !== null &&
+    typeof rawExecutionHostId !== 'string'
+  ) {
+    return { ok: false, error: 'Invalid execution host.' }
+  }
+  try {
+    const hostId = typeof rawExecutionHostId === 'string' ? rawExecutionHostId : 'local'
+    const { hostedReviewSshConnectionId } =
+      await import('../source-control/hosted-review-execution-host')
+    const connectionId = hostedReviewSshConnectionId(hostId as ExecutionHostId)
+    return { ok: true, connectionId }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid execution host.'
+    return { ok: false, error: message }
+  }
+}
+
 export function registerBitbucketHandlers(): void {
   ipcMain.handle(
     'bitbucket:connect',
@@ -103,14 +125,21 @@ export function registerBitbucketHandlers(): void {
           ? (raw.executionHostId as ExecutionHostId)
           : undefined
 
-      const { mergeBitbucketPullRequest } = await import('../bitbucket/pull-request-merge')
-      return mergeBitbucketPullRequest(
-        raw.repoPath,
-        raw.prNumber,
-        method,
-        closeSourceBranch,
-        executionHostId
-      )
+      try {
+        const { mergeBitbucketPullRequest } = await import('../bitbucket/pull-request-merge')
+        return await mergeBitbucketPullRequest(
+          raw.repoPath,
+          raw.prNumber,
+          method,
+          closeSourceBranch,
+          executionHostId
+        )
+      } catch (error) {
+        return {
+          ok: false,
+          error: `Merge failed: ${error instanceof Error ? error.message : 'Unexpected error.'}`
+        }
+      }
     }
   )
 
@@ -129,8 +158,15 @@ export function registerBitbucketHandlers(): void {
           ? (raw.executionHostId as ExecutionHostId)
           : undefined
 
-      const { declineBitbucketPullRequest } = await import('../bitbucket/pull-request-merge')
-      return declineBitbucketPullRequest(raw.repoPath, raw.prNumber, executionHostId)
+      try {
+        const { declineBitbucketPullRequest } = await import('../bitbucket/pull-request-merge')
+        return await declineBitbucketPullRequest(raw.repoPath, raw.prNumber, executionHostId)
+      } catch (error) {
+        return {
+          ok: false,
+          error: `Close failed: ${error instanceof Error ? error.message : 'Unexpected error.'}`
+        }
+      }
     }
   )
 
@@ -142,14 +178,19 @@ export function registerBitbucketHandlers(): void {
     if (!isValidRepoPath(raw.repoPath) || !isValidPrNumber(raw.prNumber)) {
       return []
     }
-    const executionHostId =
-      typeof raw.executionHostId === 'string' ? (raw.executionHostId as ExecutionHostId) : undefined
+    const hostResult = await resolveBitbucketConnectionId(raw.executionHostId)
+    if (!hostResult.ok) {
+      console.warn('Failed to resolve execution host for Bitbucket comments:', hostResult.error)
+      return []
+    }
 
-    const { fetchBitbucketPRComments } = await import('../bitbucket/comments')
-    const { hostedReviewSshConnectionId } =
-      await import('../source-control/hosted-review-execution-host')
-    const connectionId = hostedReviewSshConnectionId(executionHostId ?? 'local')
-    return fetchBitbucketPRComments(raw.repoPath, raw.prNumber, connectionId)
+    try {
+      const { fetchBitbucketPRComments } = await import('../bitbucket/comments')
+      return await fetchBitbucketPRComments(raw.repoPath, raw.prNumber, hostResult.connectionId)
+    } catch (error) {
+      console.warn('Failed to fetch Bitbucket PR comments:', error)
+      return []
+    }
   })
 
   ipcMain.handle(
@@ -169,13 +210,11 @@ export function registerBitbucketHandlers(): void {
       ) {
         return { ok: false, error: 'Invalid comment arguments.' }
       }
-      const executionHostId =
-        typeof raw.executionHostId === 'string'
-          ? (raw.executionHostId as ExecutionHostId)
-          : undefined
-      const { hostedReviewSshConnectionId } =
-        await import('../source-control/hosted-review-execution-host')
-      const connectionId = hostedReviewSshConnectionId(executionHostId ?? 'local')
+      const hostResult = await resolveBitbucketConnectionId(raw.executionHostId)
+      if (!hostResult.ok) {
+        return { ok: false, error: hostResult.error }
+      }
+      const connectionId = hostResult.connectionId
 
       if (typeof raw.parentId === 'number' && Number.isInteger(raw.parentId) && raw.parentId > 0) {
         const rootCommentId =
@@ -236,20 +275,18 @@ export function registerBitbucketHandlers(): void {
       ) {
         return { ok: false, error: 'Invalid reply arguments.' }
       }
+      const hostResult = await resolveBitbucketConnectionId(raw.executionHostId)
+      if (!hostResult.ok) {
+        return { ok: false, error: hostResult.error }
+      }
+      const connectionId = hostResult.connectionId
       const rootCommentId =
         typeof raw.rootCommentId === 'number' &&
         Number.isInteger(raw.rootCommentId) &&
         raw.rootCommentId > 0
           ? raw.rootCommentId
           : undefined
-      const executionHostId =
-        typeof raw.executionHostId === 'string'
-          ? (raw.executionHostId as ExecutionHostId)
-          : undefined
       const { replyBitbucketPRComment } = await import('../bitbucket/comments')
-      const { hostedReviewSshConnectionId } =
-        await import('../source-control/hosted-review-execution-host')
-      const connectionId = hostedReviewSshConnectionId(executionHostId ?? 'local')
       return replyBitbucketPRComment(
         raw.repoPath,
         raw.prNumber,
